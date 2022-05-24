@@ -5,9 +5,132 @@ import numpy as np
 import pycsou.abc as pycabc
 import pycsou.util.ptype as pyct
 
+
+class DiracStream:
+    r"""
+    Base class for any N-dimensional domain Dirac stream.
+    """
+
+    def __init__(self, positions: np.ndarray, weights: np.ndarray, support_width: np.ndarray, is_null: bool = False):
+        r"""
+
+        Parameters
+        ----------
+        positions
+        weights
+        support: np.ndarray
+            Should be given as a set of intervals.
+        is_null
+        """
+        self.is_null = is_null
+        self.domain_dim = positions.shape[1]  # d
+        self.positions = positions  # (_, d)
+        self.weights = weights
+
+        # the following attributes might be removed
+        self.support_width = support_width  # (d,)
+        self.support = np.stack([-self.support_width / 2, self.support_width / 2])  # (d, 2)
+
+    @property
+    def size(self):
+        return self.weights.shape[0]
+
+    def add_impulse(self, pos, weight):
+        if self.is_null:
+            self.is_null = False
+        self.positions = np.vstack([self.positions, pos])
+        self.weights = np.hstack([self.weights, weight])
+
+    def add_position(self, new_pos: np.ndarray):
+        new_pos = new_pos.reshape((-1, self.domain_dim))
+        if self.is_null and len(new_pos) > 0:
+            self.is_null = False
+        self.positions = np.vstack([self.positions, new_pos])
+        self.weights = np.append(self.weights, np.zeros(new_pos.shape[0]))  # 0 valued impulses
+
+    def set_weights(self, weights: np.ndarray):
+        assert weights.size == self.positions.shape[0]
+        self.weights = weights
+
+    def dmin(self):
+        distances = ((self.positions[..., np.newaxis, :] - self.positions[..., :, np.newaxis]) ** 2).sum(
+            axis=0
+        ) + self.domain_dim * np.max(self.support_width) ** 2 * np.eye(self.size)
+        return distances.min()
+
+    def convex_combination_extension(self, gamma: float, new_pos: np.ndarray, new_weight: float):
+        if len(new_pos) > 0:
+            self.is_null = False
+        self.positions = np.vstack([self.positions, new_pos.reshape((1, -1))])
+        self.weights = np.hstack([(1 - gamma) * self.weights, gamma * new_weight])
+
+
+class TVNorm(pycabc.Func):
+    def __init__(self):
+        super(TVNorm, self).__init__(shape=None)
+
+    def __call__(self, dirac_stream: DiracStream):
+        if dirac_stream.is_null:
+            return 0.0
+        else:
+            return np.linalg.norm(dirac_stream.weights, 1)
+
+
+class FiniteDimMeasurementOpCstrctr:
+    r"""
+    Base class modelling for a semi-infinite dimensional operator. It provides two constructor functions, each of them
+    is designed to instantiate finite dimensional linear operators, accounting for direct and adjoint calls of the
+    source operator.
+
+    Any instance/subclass of this class must implement the methods :meth:`.FiniteDimMeasurementOpCstrctr.fixedKnotsForwardOp`
+    and :meth:`.FiniteDimMeasurementOpCstrctr.fixedEvaluationPointsAdjointOp`. Additional attributes and submethods may
+    be implemented for subclasses if needed.
+    """
+
+    def fixedKnotsForwardOp(self, knots: np.ndarray) -> pycabc.LinOp:
+        r"""
+        Models for the direct call of a linear operator applied to a Dirac stream once the knots of the stream have
+        been set. Indeed, the call of the operator is still linear with respect to the weights of the stream.
+
+        Parameters
+        ----------
+        knots: np.ndarray
+            The fixed knots of the Dirac stream
+
+        Returns
+        -------
+        pycsou.abc.operator.LinOp
+            The output is an instance of a linear operator.
+        """
+        raise NotImplementedError
+
+    def fixedEvaluationPointsAdjointOp(self, evaluation_points: np.ndarray) -> pycabc.LinOp:
+        r"""
+        Models for the adjoint call of a linear operator that operates on Radon measures. The adjoint operator is
+        supposed to output a continuous function over the same domain. Once the evaluation points of the continuous
+        function are set, the call of the adjoint is linear with respect to its input.
+
+        Parameters
+        ----------
+        evaluation_points: np.ndarray
+            The points at which the output continuous function is evaluated.
+
+        Returns
+        -------
+        pycsou.abc.operator.LinOp
+            The output is an instance of a linear operator.
+        """
+        raise NotImplementedError
+
+
+#################  USELESS  ####################
+
+# Tentative for SemiInfinite Dimensional operator (continuos-domain to discrete or vice versa).
+# After discussion, this will probably be useless.
+
 # Measurement operators are defined as semi infinite-dimensional operators, InfDNDLinOp
 
-SemiInfDShape = typ.Union[typ.Tuple[int, np.infty], typ.Tuple[np.infty, int]]
+SemiInfDShape = typ.Union[typ.Tuple[int, float], typ.Tuple[float, int]]
 
 
 class InfDAdjoint(pycabc.Property):
