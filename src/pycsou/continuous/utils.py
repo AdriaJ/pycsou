@@ -51,6 +51,8 @@ class DiracStream:
     def set_weights(self, weights: np.ndarray):
         assert weights.size == self.positions.shape[0]
         self.weights = weights
+        if np.abs(weights).sum() == 0.0:
+            self.is_null = True
 
     def dmin(self):
         distances = ((self.positions[..., np.newaxis, :] - self.positions[..., :, np.newaxis]) ** 2).sum(
@@ -86,6 +88,19 @@ class FiniteDimMeasurementOpCstrctr:
     and :meth:`.FiniteDimMeasurementOpCstrctr.fixedEvaluationPointsAdjointOp`. Additional attributes and submethods may
     be implemented for subclasses if needed.
     """
+
+    def __init__(self, domain_dim: int, support_width: np.ndarray):
+        r"""
+
+        Parameters
+        ----------
+        domain_dim: int
+            Dimension of the domain of the input Radon measures.
+        support_width: np.ndarray
+            Dimensions of the support of the Dirac stream to reconstruct, should be provided as a d-dimensional array.
+        """
+        self.domain_dim = domain_dim  # d
+        self.support_width = support_width  # (d, )
 
     def fixedKnotsForwardOp(self, knots: np.ndarray) -> pycabc.LinOp:
         r"""

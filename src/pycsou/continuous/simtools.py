@@ -5,9 +5,9 @@ import pycsou.operator.linop as pyclop
 
 
 class NUFSamplingCstrctr(FiniteDimMeasurementOpCstrctr):
-    def __init__(self, frequencies: np.ndarray):
+    def __init__(self, frequencies: np.ndarray, support_width):
         self.frequencies = frequencies  # shape (L, d)
-        self.domain_dim = frequencies.shape[1]
+        super(NUFSamplingCstrctr, self).__init__(domain_dim=frequencies.shape[1], support_width=support_width)
 
     def fixedKnotsForwardOp(self, knots: np.ndarray):
         r"""
