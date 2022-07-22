@@ -54,7 +54,12 @@ class GenericFWforBLasso(pycs.Solver):
         self.lambda_ = pycrt.coerce(lambda_)
         self.forwardOpCstrctr = forwardOpCstrctr
         self.data = pycrt.coerce(data)
-        self._optim_strategy = optim_strategy
+        try:
+            assert optim_strategy in ["grid", "stochastic"]
+            self._optim_strategy = optim_strategy
+        except:
+            raise ValueError(f"optim_strategy must be in ['grid', 'stochastic'], got {optim_strategy}.")
+
         self.domain_dim = self.forwardOpCstrctr.domain_dim  # d
         self.dstream_support = np.stack(
             [-self.forwardOpCstrctr.support_width / 2, self.forwardOpCstrctr.support_width / 2]
@@ -183,12 +188,13 @@ class GenericFWforBLasso(pycs.Solver):
             return stop_crit
 
         forward = self.forwardOpCstrctr.fixedKnotsForwardOp(locations)
+        forward.lipschitz()
         data_fid = 0.5 * pycdevu.SquaredL2Norm().asloss(self.data) * forward
         regul = self.lambda_ * pycdevu.L1Norm()
         apgd = pycsol.PGD(data_fid, regul, show_progress=False)
         apgd.fit(x0=init_weights, stop_crit=correction_stop_crit(eps))
         sol, _ = apgd.stats()
-        return sol
+        return sol["x"]
 
 
 class VanillaFWforBLasso(GenericFWforBLasso):
@@ -232,10 +238,8 @@ class VanillaFWforBLasso(GenericFWforBLasso):
         except:
             raise ValueError(f"step_size must be in ['regular', 'line_search', 'optimal'], got {step_size}.")
 
-        pass
-
     def m_init(self, **kwargs):
-        super(VanillaFWforBLasso, self).m_init(**kwargs)
+        super().m_init(**kwargs)
         self._mstate["lift_variable"] = 0.0
 
     def m_step(self):
@@ -292,11 +296,85 @@ class VanillaFWforBLasso(GenericFWforBLasso):
 
 
 class PolyatomicFWforBLasso(GenericFWforBLasso):
-    def __init__(self):
-        pass
+    def __init__(
+        self,
+        data: pyct.NDArray,
+        forwardOpCstrctr: FiniteDimMeasurementOpCstrctr,
+        lambda_: float,
+        ms_threshold: float = 0.7,  # multi spikes threshold at init
+        init_correction_prec: float = 0.2,
+        final_correction_prec: float = 1e-4,
+        *,
+        optim_strategy: str = "grid",
+        folder: typ.Optional[pyct.PathLike] = None,
+        exist_ok: bool = False,
+        writeback_rate: typ.Optional[int] = None,
+        verbosity: int = 1,
+        show_progress: bool = True,
+        log_var: pyct.VarName = (
+            "positions",
+            "weights",
+            "dcv",
+            "ofv",
+        ),
+        **kwargs,
+    ):
+        super().__init__(
+            data=data,
+            forwardOpCstrctr=forwardOpCstrctr,
+            lambda_=lambda_,
+            optim_strategy=optim_strategy,
+            folder=folder,
+            exist_ok=exist_ok,
+            writeback_rate=writeback_rate,
+            verbosity=verbosity,
+            show_progress=show_progress,
+            log_var=log_var,
+            **kwargs,
+        )
+        self._ms_threshold = ms_threshold
+        self._init_correction_prec = init_correction_prec
+        self._final_correction_prec = final_correction_prec
+        self._delta = None
+
+    def m_init(self, **kwargs):
+        super().m_init(**kwargs)
+        self._mstate["correction_prec"] = self._init_correction_prec
 
     def m_step(self):
-        pass
+        mst = self._mstate
+        new_loc, dcv = self.new_atoms_locations()
+        mst["dcv"] = dcv
+
+        if abs(dcv) > 1.0:  # we add a new atom
+            if mst["positions"] is None:  # previously empty solution
+                mst["positions"] = new_loc
+            else:  # check if the candidate location has already been visited
+                test_presence = np.all(new_loc[:, None, :] == mst["positions"][None, :, :], axis=2)
+                if not np.any(test_presence):
+                    mst["positions"] = np.vstack([mst["positions"], new_loc])
+                else:
+                    idx_not_present = np.where(np.invert(np.any(test_presence, axis=1)))[0]
+                    mst["positions"] = np.vstack([mst["positions"], new_loc[idx_not_present]])
+
+        if mst["positions"].shape[0] == 1:
+            pass  # epxlicit solution to derive
+        else:
+            init_weights = np.zeros(mst["positions"].shape[0])
+            if mst["weights"] is not None:
+                init_weights[: mst["weights"].shape[0]] = mst["weights"]
+            mst["correction_prec"] = max(self._init_correction_prec / self._astate["idx"], self._final_correction_prec)
+
+            mst["weights"] = self.partial_correction(mst["positions"], init_weights, mst["correction_prec"])
+
+        mst["ofv"] = self.evaluate_objective()
 
     def extract_new_locations(self, samples: np.ndarray):
-        pass
+        dcv = max(samples.max(), samples.min(), key=abs)
+        maxi = abs(dcv)
+        if self._astate["idx"] == 1:
+            self._delta = maxi * (1.0 - self._ms_threshold)
+        thresh = maxi - (2 / self._astate["idx"] + 1) * self._delta
+        new_indices = (abs(samples) > max(thresh, 1.0)).nonzero()[0]
+        new_loc = self._sampling_scheme[new_indices, :].reshape((-1, 2))
+        return new_loc, dcv

@@ -1,3 +1,4 @@
+import datetime as dt
 import time
 
 import matplotlib
@@ -8,6 +9,7 @@ from simtools import NUFSamplingCstrctr
 from utils import DiracStream
 
 import pycsou.abc.solver as pycs
+import pycsou.opt.stop as pycos
 
 matplotlib.use("qt5agg")
 
@@ -18,7 +20,7 @@ matplotlib.use("qt5agg")
 
 lambda_factor = 0.1
 
-n_sources = 20
+n_sources = 10
 L = 100
 psnr = 100
 T = 2  # Side of the square area
@@ -113,7 +115,7 @@ if plot_examples:
 ## Solving
 
 # random sampling based estimation of lambda
-random_samples = np.random.uniform(-T / 2, T / 2, size=(1000, 2))
+random_samples = np.random.uniform(-T / 2, T / 2, size=(3000, 2))
 adj_lambda = phi_cstrctr.fixedEvaluationPointsAdjointOp(random_samples)
 evaluations = adj_lambda(measurements)
 lambda_ = lambda_factor * np.max(np.abs(evaluations))
@@ -181,10 +183,19 @@ for o in optims:
             )
         )
 
+max_duration = pycos.MaxDuration(dt.timedelta(seconds=20))
+stop_crit = pycos.RelError(
+    eps=1e-32,
+    var="ofv",
+    f=None,
+    norm=2,
+    satisfy_all=True,
+)
+
 for i, s in enumerate(solvers):
     print(f"Vanilla FW: Solver {i}")
     start = time.time()
-    s.fit()
+    s.fit(stop_crit=max_duration | stop_crit)
     times.append(time.time() - start)
     data_sol, _ = s.stats()
     solutions.append(data_sol)
@@ -192,6 +203,8 @@ for i, s in enumerate(solvers):
 plt.figure(figsize=(13, 13))
 for i, data in enumerate(solutions):
     plt.subplot(2, 2, i + 1)
+    plt.xlim([-1, 1])
+    plt.ylim([-1, 1])
     plt.scatter(
         sources.positions[:, 0],
         sources.positions[:, 1],
@@ -219,5 +232,5 @@ for i, data in enumerate(solutions):
         c="green",
         alpha=0.6,
     )
-    plt.title(optims[i // 2] + " " + steps[i % 2] + ": {:.3f}".format(times[i]))
+    plt.title(optims[i // 2] + " " + steps[i % 2] + ": {:.3f} - OFV: {:.1f}".format(times[i], data["ofv"][0]))
 plt.show()
