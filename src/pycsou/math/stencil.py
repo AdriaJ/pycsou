@@ -73,7 +73,6 @@ def make_nd_stencil(coefficients: pyct.NDArray, center: pyct.NDArray):
     indices = xp.indices(coefficients.shape).reshape(coefficients.ndim, -1).T - center[None, ...]
     coefficients = coefficients.ravel()
     kernel_string = _create_kernel_string(coefficients, indices)
-
     exec(_stencil_string.substitute(kernel=kernel_string), globals())
     return my_stencil
 
@@ -192,7 +191,8 @@ _stencil_string = string.Template(
 @numba.njit(parallel=True, fastmath=True, nogil=True)
 def my_stencil(arr):
     stencil = numba.stencil(
-    lambda a: ${kernel}
+    lambda a: ${kernel},
+    signature=["float32(float32), float64(float64)"]
     )(arr)
     return stencil"""
 )
