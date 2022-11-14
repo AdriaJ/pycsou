@@ -1,5 +1,5 @@
-import math
 import string
+import typing as typ
 
 import numba
 import numba.cuda
@@ -9,7 +9,7 @@ import pycsou.util as pycu
 import pycsou.util.ptype as pyct
 
 
-def make_nd_stencil(coefficients: pyct.NDArray, center: pyct.NDArray):
+def make_nd_stencil(coefficients: pyct.NDArray, center: pyct.NDArray) -> typ.Callable:
     r"""
     Create a multi-dimensional Numba stencil from a set of coefficients.
 
@@ -69,15 +69,14 @@ def make_nd_stencil(coefficients: pyct.NDArray, center: pyct.NDArray):
     :py:class:`~pycsou.operator.linop.base.Stencil
     """
 
-    xp = pycu.get_array_module(coefficients)
-    indices = xp.indices(coefficients.shape).reshape(coefficients.ndim, -1).T - center[None, ...]
-    coefficients = coefficients.ravel()
+    indices = np.indices(coefficients.shape).reshape(coefficients.ndim, -1).T - center[None, ...]
+    coefficients = pycu.compute(coefficients).ravel()
     kernel_string = _create_kernel_string(coefficients, indices)
-    exec(_stencil_string.substitute(kernel=kernel_string), globals())
+    exec(_stencil_string.substitute(kernel=kernel_string, dtype=coefficients.dtype), globals())
     return my_stencil
 
 
-def make_nd_stencil_gpu(coefficients: pyct.NDArray, center: pyct.NDArray):
+def make_nd_stencil_gpu(coefficients: pyct.NDArray, center: pyct.NDArray, func_name: str) -> typ.Callable:
     r"""
     Create a multi-dimensional GPU stencil from a set of coefficients.
 
@@ -136,29 +135,41 @@ def make_nd_stencil_gpu(coefficients: pyct.NDArray, center: pyct.NDArray):
     :py:class:`~pycsou.operator.linop.base.Stencil`
 
     """
+    # If kernel is 3D, then the computation has to loop over samples (numba cuda grid can have at maximum 3 dimensions)
+    if coefficients.ndim > 3:
+        raise ValueError("The Stencil operator does not support GPU kernels with more than 3D dims.")
 
-    letters1 = list(string.ascii_lowercase)[: coefficients.ndim + 1]
-    letters2 = list(string.ascii_lowercase)[coefficients.ndim + 1 : 2 + 2 * coefficients.ndim]
-    indices = np.indices(coefficients.shape).reshape(coefficients.ndim, -1).T - center[None, ...]
-    coefficients = coefficients.ravel()
+    stacking_dim = 1 if coefficients.ndim < 3 else 0
+    letters1 = list(string.ascii_lowercase)[: coefficients.ndim + stacking_dim]
+    letters2 = list(string.ascii_lowercase)[coefficients.ndim + stacking_dim : 2 * (coefficients.ndim + stacking_dim)]
 
-    kernel_string = _create_kernel_string_gpu(letters1, coefficients, indices)
-    if_statement = _create_if_statement_gpu(letters1, letters2, indices, coefficients)
+    indices = np.indices(coefficients.shape).reshape(coefficients.ndim, -1).T - center
+    kernel_string = _create_kernel_string_gpu(letters1, coefficients.ravel(), indices, stacking_dim)
+    if_statement = _create_if_statement_gpu(letters1, letters2, indices, coefficients, stacking_dim)
 
     exec(
         _stencil_string_gpu.substitute(
+            func_name=func_name,
             letters1=", ".join(letters1),
             letters2=", ".join(letters2),
             len_letters=str(len(letters1)),
             if_statement=if_statement,
             kernel=kernel_string,
+            dtype=f"{coefficients.dtype}["
+            + ",".join(
+                [
+                    ":",
+                ]
+                * (coefficients.ndim + stacking_dim)
+            )
+            + "]",
         ),
         globals(),
     )
-    return kernel_cupy
+    return globals()[f"kernel_cupy_{func_name}"]
 
 
-def _create_kernel_string(coefficients, indices):
+def _create_kernel_string(coefficients: pyct.NDArray, indices: pyct.NDArray) -> str:
     return " + ".join(
         [
             f"a[0, {', '.join([str(elem) for elem in ids_])}] * np.{coefficients.dtype}({str(coefficients[i])})"
@@ -167,19 +178,23 @@ def _create_kernel_string(coefficients, indices):
     )
 
 
-def _create_kernel_string_gpu(letters1, coefficients, indices):
-    return " + ".join(
+def _create_kernel_string_gpu(letters1: typ.List, coefficients: pyct.NDArray, indices: pyct.NDArray, stacking_dim: int):
+    stacking_str = f"{letters1[0]}, " if stacking_dim else ""
+    return f" + ".join(
         [
-            f"arr[{letters1[0]}, {', '.join(['+'.join([letters1[e + 1], str(elem)]) for e, elem in enumerate(ids_)])}] * np.{coefficients.dtype}({str(coefficients[i])})"
+            f"arr[{stacking_str}{', '.join(['+'.join([letters1[e + stacking_dim], str(elem)]) for e, elem in enumerate(ids_)])}] * cp.{coefficients.dtype}({str(coefficients[i])})"
             for i, ids_ in enumerate(indices)
         ]
     )
 
 
-def _create_if_statement_gpu(letters1, letters2, indices, coefficients):
-    return f"0 <= {letters1[0]} < {letters2[0]} and " + " and ".join(
+def _create_if_statement_gpu(
+    letters1: typ.List, letters2: typ.List, indices: pyct.NDArray, coefficients: pyct.NDArray, stacking_dim: int
+):
+    stacking_str = f"(0 <= {letters1[0]} < {letters2[0]}) and " if stacking_dim else ""
+    return stacking_str + " and ".join(
         [
-            f"{-np.min(indices, axis=0)[i]} <= {letters1[i + 1]} < {letters2[i + 1]} - {np.max(indices, axis=0)[i]}"
+            f"({-np.min(indices, axis=0)[i]} <= {letters1[i + stacking_dim]} < ({letters2[i+ stacking_dim]} - {np.max(indices, axis=0)[i]}))"
             for i in range(coefficients.ndim)
         ]
     )
@@ -192,14 +207,16 @@ _stencil_string = string.Template(
 def my_stencil(arr):
     stencil = numba.stencil(
     lambda a: ${kernel},
-    signature=["float32(float32), float64(float64)"]
+    signature=["${dtype}(${dtype})"]
     )(arr)
     return stencil"""
 )
 _stencil_string_gpu = string.Template(
     r"""
+import cupy as cp
+#@numba.cuda.jit('void(${dtype},${dtype})') # fails for float32
 @numba.cuda.jit
-def kernel_cupy(arr, out):
+def kernel_cupy_${func_name}(arr, out):
     $letters1 = numba.cuda.grid(${len_letters}) # j, k
     $letters2 = arr.shape # n, m
     if $if_statement:
