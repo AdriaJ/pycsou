@@ -926,7 +926,7 @@ class Stencil(pyco.SquareOp):
         self._set_boundaries(ndim, boundary)
         self._set_depths(ndim)
         self._set_trimmers()
-        self.threadsperblock = self._compute_threadsperblock(stencil_coefs.shape)
+        self._set_threadsperblock(stencil_coefs.shape)
 
     def _set_boundaries(self, ndim, boundary):
         default = "none"
@@ -1026,21 +1026,32 @@ class Stencil(pyco.SquareOp):
         _depth = tuple([0] + [depth_sides[i] for i in range(self.ndim)])
         return _depth, stencil_coefs, center
 
-    @staticmethod
-    def _next_power_of_2(x):
-        return 1 if x == 0 else 2 ** (x - 1).bit_length()
-
-    def _compute_threadsperblock(self, kernel_shape):
-        tpb = [int(self._next_power_of_2(kernel_shape[d])) for d in range(len(kernel_shape) - 1)]
-        tpb = [1] + tpb + [int(1024 / np.prod(tpb))]
-
-        # If nthreads larger than array size, use threads in other dims
-        for i in range(len(tpb) - 1, 0, -1):
+    def _set_threadsperblock(self, kernel_shape):
+        # Set at least as many threads as kernel elements per dimension
+        _next_power_of_2 = lambda x: 1 if x == 0 else 2 ** (x - 1).bit_length()
+        tpb = [int(_next_power_of_2(kernel_shape[d])) for d in range(len(kernel_shape))]
+        # Set maximum number of threads in the row-major order
+        tpb[-1] = int(1024 / (np.prod(tpb) / tpb[-1]))
+        # If kernel has less than 3D, add stacking dimension
+        if len(self.arg_shape) < 3:
+            tpb = [1] + tpb
+        # If nthreads larger than a given array dimension size, use threads in other dimensions
+        # This maximizes locality of cached memory (row-major order) to improve performance
+        for i in range(len(tpb) - 1, -1, -1):
             while tpb[i] > self.arg_shape[i - 1] + np.sum(self.pad_widths["apply"][i]):
                 tpb[i] = int(tpb[i] / 2)
-                if i > 1:
+                if i > 0:
                     tpb[i - 1] = int(tpb[i - 1] * 2)
-        return tpb
+
+        self.threadsperblock = tuple(tpb)
+
+    def _get_blockspergrid(self, arr_shape):
+        # dynamically define blockspergrid based on input array shape and predefined threadsperblock
+        aux_stacking = 0 if len(self.arg_shape) < 3 else 1
+        blockspergrid = tuple(
+            [math.ceil(arr_shape[i + aux_stacking] / tpb) for i, tpb in enumerate(self.threadsperblock)]
+        )
+        return blockspergrid
 
     def _pad_and_allocate_output(
         self, arr: pyct.NDArray, direction: str = "apply"
