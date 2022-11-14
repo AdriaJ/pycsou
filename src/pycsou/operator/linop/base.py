@@ -692,6 +692,7 @@ class Stencil(pyco.SquareOp):
         self.ndim = len(arg_shape)
         self._sanitize_inputs(stencil_coefs, center, boundary)
         self._make_stencils(self.stencil_coefs)
+        self._lipschitz = 2 * abs(self.stencil_coefs).max()
         self._enable_warnings = bool(enable_warnings)
 
     @pycrt.enforce_precision(i="arr", o=True)
@@ -739,6 +740,57 @@ class Stencil(pyco.SquareOp):
             # TODO should we store this sparse matrix for when using iterative agorithms?
             A = self.as_sparse_array(xp=pycu.get_array_module(self.stencil_coefs), dtype=arr.dtype).T
             return (A.dot(arr.reshape(-1, np.prod(self.arg_shape)).T)).T.reshape(arr.shape)
+
+    def asarray(self, **kwargs) -> pyct.NDArray:
+        r"""
+        Make a matrix representation of the stencil operator.
+        """
+        dtype = kwargs.pop("dtype", pycrt.getPrecision().value)
+        xp = kwargs.pop("xp", pycd.NDArrayInfo.NUMPY.module())
+        dtype_ = self.stencil_coefs.dtype
+        xp_ = pycu.get_array_module(self.stencil_coefs)
+
+        E = xp_.eye(self.dim, dtype=dtype_)
+        A = self.apply(E).T
+        A = pycu.to_NUMPY(A) if xp_.__name__ == "cupy" and xp.__name__ != "cupy" else A
+        return xp.array(A, dtype=dtype)
+
+    def as_sparse_array(self, **kwargs) -> pyct.NDArray:
+        r"""
+        Make a sparse matrix representation of the stencil operator.
+        """
+        A = self.asarray(**kwargs)
+        N = pycd.NDArrayInfo
+        info = N.from_obj(A)
+        xp = pycu.get_array_module(A)
+        if info == N.CUPY:
+            assert pycd.CUPY_ENABLED
+            import cupyx.scipy.sparse as spx
+        else:
+            import scipy.sparse as spx
+
+        if info == N.DASK:
+            # Convert to a sparse Dask Array
+            import sparse
+
+            A.map_blocks(sparse.COO)
+        else:
+            # Conver to SciPy or CuPy sparse
+            A = spx.csr_matrix(A, dtype=A.dtype)
+
+        return A
+
+    def lipschitz(self, **kwargs) -> pyct.Real:
+        r"""
+        Compute a Lipschitz constant of the stenil operator.
+        """
+        N = pycd.NDArrayInfo
+        info = N.from_obj(self.stencil_coefs)
+        kwargs.update(
+            xp=info.module(),
+            gpu=info == N.CUPY,
+        )
+        return super().lipschitz(**kwargs)
 
     def _apply(self, arr: pyct.NDArray) -> pyct.NDArray:
         return self._trim_apply(
