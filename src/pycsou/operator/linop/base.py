@@ -15,7 +15,7 @@ import pycsou.util.deps as pycd
 import pycsou.util.ptype as pyct
 import pycsou.util.warning as pycuw
 
-__all__ = ["IdentityOp", "NullOp", "NullFunc", "HomothetyOp", "DiagonalOp", "Stencil", "SumOp"]
+__all__ = ["IdentityOp", "NullOp", "NullFunc", "HomothetyOp", "DiagonalOp", "Stencil", "SumOp", "TrimOp"]
 
 
 class IdentityOp(pyca.OrthProjOp):
@@ -511,6 +511,15 @@ def _ExplicitLinOp(
 
 
 class TrimOp(pyco.LinOp):
+    """
+    Trimming Operator.
+
+    This operator trims the input array in each dimension according the specified widths.
+
+    Its adjoint zero-pads each dimension with the same widths.
+
+    """
+
     def __init__(self, arg_shape, widths):
         r"""
         Parameters
@@ -524,30 +533,35 @@ class TrimOp(pyco.LinOp):
         assert (len(arg_shape) + 1) == len(widths), "`arg_shape` and `widths` must have the same number of elements"
         self.arg_shape = arg_shape
         self.widths = widths
-        out_shape = [s - np.sum(widths[i + 1]) for i, s in enumerate(arg_shape)]
-        super(TrimOp, self).__init__(shape=(np.prod(arg_shape), np.prod(out_shape)))
+        self.out_shape = [s - np.sum(widths[i + 1]) for i, s in enumerate(arg_shape)]
+        self._lipscthiz = 1
+        super(TrimOp, self).__init__(shape=(np.prod(self.out_shape), np.prod(arg_shape)))
 
+    @pycrt.enforce_precision(i="arr")
     def apply(self, arr: pyct.NDArray) -> pyct.NDArray:
         r"""
         Trim sides from an array.
         """
-        slices = []
-        for (start, end) in self.widths:
+        out_shape = arr.shape[:-1] + (self.codim,)
+        slices = [slice(0, None, None)]
+        for (start, end) in self.widths[1:]:
             end = None if end == 0 else -end
             slices.append(slice(start, end))
-        return arr.reshape(-1, *self.arg_shape)[tuple(slices)]
 
+        return arr.reshape(-1, *self.arg_shape)[tuple(slices)].reshape(out_shape)
+
+    @pycrt.enforce_precision(i="arr")
     def adjoint(self, arr: pyct.NDArray) -> pyct.NDArray:
         r"""
         Pad input according to the widths.
         """
         xp = pycu.get_array_module(arr)
-        arr = arr.reshape(-1, *self.arg_shape)
+        out_shape = arr.shape[:-1] + (self.dim,)
+        arr = arr.reshape(-1, *self.out_shape)
         for i in range(1, len(self.widths)):
-
             _pad_width = tuple([(0, 0) if i != j else self.widths[i] for j in range(len(self.widths))])
-            arr = xp.pad(array=arr, pad_width=_pad_width, mode="constant", cval=0.0)
-        return arr
+            arr = xp.pad(array=arr, pad_width=_pad_width)
+        return arr.reshape(out_shape)
 
 
 class Stencil(pyco.SquareOp):
@@ -555,7 +569,7 @@ class Stencil(pyco.SquareOp):
     Base class for NDArray computing functions that operate only on a local region of the NDArray through a
     multi-dimensional kernel, namely through correlation and convolution.
 
-    This class leverages the :py:func:`numba.stencil` decorator, which allowing to JIT (Just-In-Time) compile these
+    This class leverages the :py:func:`numba.stencil` decorator, which allows to JIT (Just-In-Time) compile these
     functions to run more quickly.
 
 
