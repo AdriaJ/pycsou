@@ -584,7 +584,10 @@ class Stencil(pyco.SquareOp):
         # Dask
         data_da = da.from_array(data, chunks=da_blocks).reshape(nsamples, -1)
 
-        kernel = np.array([[0.5, 0, 0.5], [0, 0, 0], [0.5, 0, 0.5]])
+        kernel = np.array([[0.5, 0.0, 0.5],
+                           [0.0, 0.0, 0.0],
+                           [0.5, 0.0, 0.5]])
+
         center = np.array([1, 0])
 
         stencil = Stencil(stencil_coefs=kernel, center=center, arg_shape=data_shape, boundary=0.)
@@ -602,7 +605,7 @@ class Stencil(pyco.SquareOp):
 
     Remark 1
     --------
-    The :py:class:`~pycsou.operator.linop.base.Stencil` allows to perform both correlation and convolution. By default,
+    The :py:class:`~pycsou.operator.linop.base.Stencil` class allows to perform both correlation and convolution. By default,
     the ``apply`` method will perform **correlation** of the input array with the given kernel / stencil, whereas the
     ``adjoint`` method will perform **convolution**.
 
@@ -611,49 +614,55 @@ class Stencil(pyco.SquareOp):
     When instantiated with a multi-dimensional kernel, the :py:class:`~pycsou.operator.linop.base.Stencil` performs
     convolution and correlation operations as non-separable filters. When possible, the user can decide whether to
     separate the filtering operation by composing different stencils for different axis to accelerate performance. This
-    approach is not guaranteed to improve performance due to the repeated copying of arrays due internal padding
-    operations.
+    approach is not guaranteed to improve performance due to the repeated copying of arrays associated to internal
+    padding operations.
 
     Remark 3
     --------
     There are five padding mode supported: ‘reflect’, ‘periodic’, ‘nearest’, ‘none’ (zero padding), or 'cval'
-    (constant value). If a str or a real value are given, the same padding is applied to all dimensions in the domain of
-    the stencil computation. To specify different padding modes for each axis, use a tuple or a dict. The padding depth
-    is automatically set to guarantee that the kernel always find support when centered in the extremes of the input
-    array.
+    (constant value). If an argument of the form `string` or `float` is given, the same padding is applied to all
+    dimensions in the domain of the stencil computation. To specify different padding modes for each axis, use a tuple
+    or a dict. The padding depth is automatically set to guarantee that the kernel always finds support on the padded
+    input array.
 
     Remark 4
     --------
     Stencil computations on Dask arrays are performed with :py:func:`~Dask.array.map_overlap`. Please note that in that
-    scnario, if an asymmetric kernel is used to instantiate the Stencil class, a new symmetric kernel (padded with
-    zeros) will be used instead (except for the padding option 'none', which accepts non-symmetric kernels).
+    case, if a non-centered kernel is used to instantiate the Stencil class, a new centered kernel (padded with zeros)
+    will be used instead (except for the padding option 'none', which accepts non-centered kernels).
 
     Remark 5
     --------
     By default, for GPU computing, the ``threadsperblock`` argument is set according to the following criteria:
 
-    .. math::
+    - Number of total threads limited to :math:`c=1024` is the `limit number of threads per block in current GPUs <https://docs.nvidia.com/cuda/cuda-c-programming-guide/>`_, i.e.,:
 
-        \prod_{i=0}^{D-1} t_{i} \leq c
+        .. math::
 
-    where :math:`t_{i}` is the number of threads per block in dimension :math:`i`, :math:`D` is the number of dimensions
-    of the kernel, and  :math:`c=1024` is the `limit number of threads per block in current GPUs
-    <https://docs.nvidia.com/cuda/cuda-c-programming-guide/>`_.
+            \prod_{i=0}^{D-1} t_{i} \leq c
 
-    Because arrays are stored in row-major order, a larger number of threds per block in the last axis of the Cupy array
-    benefits the spatial locality in memory caching. For this reason ``threadsperblock`` is set to the maximum number in
-    the last axis, and to the minimum possible (respecting the kernel shape) in the other axes.
+        where :math:`t_{i}` is the number of threads per block in dimension :math:`i`, :math:`D` is the number of dimensions
+        of the kernel.
 
-    .. math::
+    - Maximum number of contiguous threads as possible:
 
-        t_{i} = 2^{j} \geq k_{i}, s.t., 2^{j-1} < k_{i} \quad \textrm{for} \quad i\in[0, \dots, D-2],
+        Because arrays are stored in row-major order, a larger number of threads per block in the last axis of the Cupy
+        array benefits the spatial locality in memory caching. For this reason ``threadsperblock`` is set to the maximum
+        number in the last axis, and to the minimum possible (respecting the kernel shape) in the other axes.
 
-    where :math:`k_{i}` is the size of the kernel in dimension :math:`i`, and:
+        .. math::
 
-    .. math::
+            t_{i} = 2^{j} \leq k_{i}, s.t., 2^{j+1} > k_{i} \quad \textrm{for} \quad i\in[0, \dots, D-2],
 
-        t_{D-1} = \frac{1024}{\prod_{i=1}^{D-2}}
+    .. warning::
 
+        Only the boundary conditions ‘periodic’, ‘none’ or 'cval' yield operators in which the `adjoint` method is
+        admits its evaluation via a stencil-like computation. In the case of 'reflect' and 'nearest', a sparse matrix
+        representation is created for the adjoint operation.
+
+        Due to code compilation the stencil methods assume arrays are in row-major or C order. If the input array is in
+        Fortran or F order, a copy in C order is created automatically, which can lead to increased time and memory
+        usage.
     """
 
     def __init__(
@@ -669,7 +678,7 @@ class Stencil(pyco.SquareOp):
         Parameters
         ----------
         stencil_coefs: NDArray
-            Stencil coefficients. Must have the same number of dimension as the input array's arg_shape (i.e., without the
+            Stencil coefficients. Must have the same number of dimensions as the input array's arg_shape (i.e., without the
             stacking dimension).
         center: NDArray
             Index of the kernel's center. Must be a 1-dimensional array with one element per dimension in ``stencil_coefs``.
@@ -852,19 +861,27 @@ class Stencil(pyco.SquareOp):
         return self._adjoint(arr)
 
     def _make_stencils_cpu(self, stencil_coefs: pyct.NDArray, **kwargs) -> None:
-        self.stencil = pycstencil.make_nd_stencil(self.stencil_coefs, self.center)
-        self.stencil_dask = pycstencil.make_nd_stencil(self.stencil_coefs_dask, self.center_dask)
-        self.stencil_adjoint = pycstencil.make_nd_stencil(self.stencil_coefs_adjoint, self.center_adjoint)
+        self.stencil = pycstencil.make_nd_stencil(coefficients=self.stencil_coefs, center=self.center)
+        self.stencil_dask = pycstencil.make_nd_stencil(coefficients=self.stencil_coefs_dask, center=self.center_dask)
+        self.stencil_adjoint = pycstencil.make_nd_stencil(
+            coefficients=self.stencil_coefs_adjoint, center=self.center_adjoint
+        )
         self.stencil_adjoint_dask = pycstencil.make_nd_stencil(
-            self.stencil_coefs_adjoint_dask, self.center_adjoint_dask
+            coefficients=self.stencil_coefs_adjoint_dask, center=self.center_adjoint_dask
         )
 
     def _make_stencils_gpu(self, stencil_coefs: pyct.NDArray, **kwargs) -> None:
-        self.stencil = pycstencil.make_nd_stencil_gpu(self.stencil_coefs, self.center)
-        self.stencil_dask = pycstencil.make_nd_stencil(self.stencil_coefs_dask, self.center_dask)
-        self.stencil_adjoint = pycstencil.make_nd_stencil_gpu(self.stencil_coefs_adjoint, self.center_adjoint)
-        self.stencil_adjoint_dask = pycstencil.make_nd_stencil(
-            self.stencil_coefs_adjoint_dask, self.center_adjoint_dask
+        self.stencil = pycstencil.make_nd_stencil_gpu(
+            coefficients=self.stencil_coefs, center=self.center, func_name="apply"
+        )
+        self.stencil_dask = pycstencil.make_nd_stencil_gpu(
+            coefficients=self.stencil_coefs_dask, center=self.center_dask, func_name="apply_dask"
+        )
+        self.stencil_adjoint = pycstencil.make_nd_stencil_gpu(
+            coefficients=self.stencil_coefs_adjoint, center=self.center_adjoint, func_name="adjoint"
+        )
+        self.stencil_adjoint_dask = pycstencil.make_nd_stencil_gpu(
+            coefficients=self.stencil_coefs_adjoint_dask, center=self.center_adjoint_dask, func_name="adjoint_dask"
         )
 
     @pycu.redirect("stencil_coefs", CUPY=_make_stencils_gpu)
@@ -872,10 +889,10 @@ class Stencil(pyco.SquareOp):
         self._make_stencils_cpu(stencil_coefs)
 
     def _pad(self, arr: pyct.NDArray, direction: str = "apply") -> pyct.NDArray:
-        r"""
-        Pad input according to the kernel's shape and center.
-        """
+        # Pad input according to the kernel's shape and center.
+        # It ensures that the padded array is in C-order.
         xp = pycu.get_array_module(arr)
+        arr = arr if arr.flags["C_CONTIGUOUS"] else xp.ascontiguousarray(arr, dtype=arr.dtype)
         arr = arr.reshape(-1, *self.arg_shape)
         if len(set(self._padding_kwargs["mode"].values())) == 1:
             # if there is only one boundary mode, pad only once.
@@ -895,9 +912,7 @@ class Stencil(pyco.SquareOp):
         return arr
 
     def _get_padding(self, dim):
-        """
-        return padding kwargs for given dimension ``dim``.
-        """
+        # returns padding kwargs for given dimension.
         padding_kwargs = dict()
         for key, value in self._padding_kwargs.items():
             try:
@@ -907,9 +922,7 @@ class Stencil(pyco.SquareOp):
         return padding_kwargs
 
     def _sanitize_inputs(self, stencil_coefs: pyct.NDArray, center: pyct.NDArray, boundary):
-        r"""
-        Check that inputs have the correct shape and correctly handle the boundary conditions.
-        """
+        # Check that inputs have the correct shape and correctly handle the boundary conditions.
         assert len(center) == stencil_coefs.ndim == self.ndim, (
             "The stencil coefficients should have the same"
             " number of dimensions as `arg_shape` and the "
@@ -917,9 +930,9 @@ class Stencil(pyco.SquareOp):
         )
         self.xp = xp = pycu.get_array_module(stencil_coefs)
         self.stencil_coefs = self.stencil_coefs_dask = stencil_coefs
-        self.center = self.center_dask = xp.asarray(center)
+        self.center = self.center_dask = np.atleast_1d(center)
         self.stencil_coefs_adjoint = self.stencil_coefs_adjoint_dask = xp.flip(stencil_coefs)
-        self.center_adjoint = self.center_adjoint_dask = xp.array(stencil_coefs.shape) - 1 - xp.asarray(center)
+        self.center_adjoint = self.center_adjoint_dask = np.array(stencil_coefs.shape) - 1 - np.atleast_1d(center)
 
         ndim = stencil_coefs.ndim
 
@@ -929,6 +942,7 @@ class Stencil(pyco.SquareOp):
         self._set_threadsperblock(stencil_coefs.shape)
 
     def _set_boundaries(self, ndim, boundary):
+        # reformat boundary condition information for different backends
         default = "none"
         if boundary is None:
             boundary = default
@@ -948,12 +962,13 @@ class Stencil(pyco.SquareOp):
             if this_mode == "none":
                 mode.update(dict([(ax, "constant")]))
                 cval.update(dict([(ax, 0.0)]))
+                boundary[ax] = 0.0
 
             elif this_mode == "periodic":
                 mode.update(dict([(ax, "wrap")]))
 
             elif this_mode == "reflect":
-                mode.update(dict([(ax, "reflect")]))
+                mode.update(dict([(ax, "symmetric")]))
 
             elif this_mode == "nearest":
                 mode.update(dict([(ax, "edge")]))
@@ -970,33 +985,27 @@ class Stencil(pyco.SquareOp):
         self._padding_kwargs = dict(mode=mode, constant_values=cval)
 
     def _set_depths(self, ndim):
-        xp = self.xp
-        depth_right = xp.array(self.stencil_coefs.shape) - self.center - 1
+        # set appropriate padding depth for different backends
+        depth_right = np.atleast_1d(self.stencil_coefs.shape) - self.center - 1
         _pad_width = tuple([(0, 0)] + [(self.center[i].item(), depth_right[i].item()) for i in range(ndim)])
-        depth_right = xp.array(self.stencil_coefs_adjoint.shape) - self.center_adjoint - 1
+        depth_right = np.atleast_1d(self.stencil_coefs_adjoint.shape) - self.center_adjoint - 1
         _pad_width_adjoint = tuple(
             [(0, 0)] + [(self.center_adjoint[i].item(), depth_right[i].item()) for i in range(ndim)]
         )
         self.pad_widths = dict(apply=_pad_width, adjoint=_pad_width_adjoint)
 
-        # If boundary conditions are not 'none' for some dimension, then Dask's map_overlap needs a symmetric kernel.
-        if any(map("none".__ne__, self._boundary.values())):  # some key is not 'none' --> center dask kernel
-            self._depth, self.stencil_coefs_dask, self.center_dask = self._convert_sym_ker(
-                self.stencil_coefs_dask, self.center_dask
-            )
-            self._depth_adjoint, self.stencil_coefs_adjoint_dask, self.center_adjoint_dask = self._convert_sym_ker(
-                self.stencil_coefs_adjoint_dask, self.center_adjoint_dask
-            )
-        else:
-            depth_right = xp.array(self.stencil_coefs_dask.shape) - self.center_dask - 1
-            self._depth = {0: 0}
-            self._depth.update({i + 1: (self.center_dask[i], depth_right[i]) for i in range(self.ndim)})
-
-            depth_right = xp.array(self.stencil_coefs_adjoint_dask.shape) - self.center_adjoint_dask - 1
-            self._depth_adjoint = {0: 0}
-            self._depth_adjoint.update({i + 1: (self.center_adjoint_dask[i], depth_right[i]) for i in range(self.ndim)})
+        # Dask's map_overlap needs a symmetric kernel (unless boundary conditions are 'none', which has a behavior that
+        # does is not supported in numpy.pad and thus is not supported here
+        # Center dask kernel
+        self._depth, self.stencil_coefs_dask, self.center_dask = self._convert_sym_ker(
+            self.stencil_coefs_dask, self.center_dask
+        )
+        self._depth_adjoint, self.stencil_coefs_adjoint_dask, self.center_adjoint_dask = self._convert_sym_ker(
+            self.stencil_coefs_adjoint_dask, self.center_adjoint_dask
+        )
 
     def _set_trimmers(self):
+        # to unpad output of stencil.
         arg_shape_apply = [s + np.sum(self.pad_widths["apply"][i + 1]) for i, s in enumerate(self.arg_shape)]
         arg_shape_adjoint = [s + np.sum(self.pad_widths["adjoint"][i + 1]) for i, s in enumerate(self.arg_shape)]
         self._trim_apply = TrimOp(arg_shape_apply, self.pad_widths["apply"])
@@ -1005,24 +1014,18 @@ class Stencil(pyco.SquareOp):
     def _convert_sym_ker(
         self, stencil_coefs: pyct.NDArray, center: pyct.NDArray
     ) -> typ.Tuple[typ.Tuple, pyct.NDArray, pyct.NDArray]:
-        r"""
-        Creates a symmetric kernel stencil to use with Dask's map_overlap() in case of non-default ('none') boundary
-        conditions.
-        """
+        # Creates a symmetric kernel stencil to use with Dask's map_overlap() in case of non-default ('none') boundary
+        # conditions.
         xp = pycu.get_array_module(stencil_coefs)
-        dist_center = (
-            -(xp.array(stencil_coefs.shape) // 2 - xp.asarray(center)) * 2
-            - xp.mod(xp.array(stencil_coefs.shape), 2)
-            + 1
-        )
+        dist_center = -(np.array(stencil_coefs.shape) // 2 - center) * 2 - np.mod(np.array(stencil_coefs.shape), 2) + 1
 
-        pad_left = abs(xp.clip(dist_center, a_min=-xp.infty, a_max=0)).astype(int)
-        pad_right = xp.clip(dist_center, a_min=0, a_max=xp.infty).astype(int)
+        pad_left = abs(np.clip(dist_center, a_min=-np.infty, a_max=0)).astype(int)
+        pad_right = np.clip(dist_center, a_min=0, a_max=np.infty).astype(int)
         pad_width = tuple([(pad_left[i].item(), pad_right[i].item()) for i in range(self.ndim)])
         stencil_coefs = xp.pad(stencil_coefs, pad_width=pad_width)
-        center = xp.array(stencil_coefs.shape) // 2
+        center = np.atleast_1d(stencil_coefs.shape) // 2
 
-        depth_sides = xp.array(stencil_coefs.shape) - center - 1
+        depth_sides = np.array(stencil_coefs.shape) - center - 1
         _depth = tuple([0] + [depth_sides[i] for i in range(self.ndim)])
         return _depth, stencil_coefs, center
 
@@ -1056,6 +1059,7 @@ class Stencil(pyco.SquareOp):
     def _pad_and_allocate_output(
         self, arr: pyct.NDArray, direction: str = "apply"
     ) -> typ.Tuple[pyct.NDArray, pyct.NDArray]:
+        # pad input GPU array and initialise GPU output of same shape.
         xp = pycu.get_array_module(arr)
         arr = self._pad(arr, direction=direction)
         out = xp.zeros_like(arr)
