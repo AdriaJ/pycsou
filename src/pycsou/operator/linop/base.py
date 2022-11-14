@@ -662,6 +662,7 @@ class Stencil(pyco.SquareOp):
         center: pyct.NDArray,
         arg_shape: pyct.Shape,
         boundary: typ.Optional[typ.Union[pyct.Real, str, tuple, dict]] = None,
+        enable_warnings: bool = True,
     ):
         r"""
 
@@ -679,6 +680,9 @@ class Stencil(pyco.SquareOp):
             like 0 or np.nan. If a list then each element must be a str, tuple or dict defining the boundary for the
             corresponding array in args. The default value is ‘none’. For more information, the user is referred to
             <https://docs.dask.org/en/stable/array-overlap.html#boundaries>`_.
+        enable_warnings: bool
+            If ``True``, emit a warning in case of precision mismatch issues.
+
         """
         size = np.prod(arg_shape).item()
 
@@ -688,42 +692,9 @@ class Stencil(pyco.SquareOp):
         self.ndim = len(arg_shape)
         self._sanitize_inputs(stencil_coefs, center, boundary)
         self._make_stencils(self.stencil_coefs)
+        self._enable_warnings = bool(enable_warnings)
 
-    def _apply(self, arr: pyct.NDArray) -> pyct.NDArray:
-        return self._trim_apply(self.stencil(self._pad(arr))).reshape(arr.shape)
-
-    def _apply_dask(self, arr: pyct.NDArray) -> pyct.NDArray:
-        return arr.reshape(-1, *self.arg_shape).map_overlap(
-            self.stencil_dask, depth=self._depth, boundary=self._boundary, dtype=pycrt.getPrecision().value
-        )
-
-    def _apply_cupy(self, arr: pyct.NDArray) -> pyct.NDArray:
-        out_shape = arr.shape
-        arr, out = self._pad_and_allocate_output(arr)
-        blockspergrid = [math.ceil(out.shape[i] / tpb) for i, tpb in enumerate(self.threadsperblock)]
-        self.stencil[blockspergrid, self.threadsperblock](arr, out)
-        return self._trim_apply(out).reshape(out_shape)
-
-    def _adjoint(self, arr: pyct.NDArray) -> pyct.NDArray:
-        return self._trim_adjoint(self.stencil_adjoint(self._pad(arr, direction="adjoint"))).reshape(arr.shape)
-
-    def _adjoint_dask(self, arr: pyct.NDArray) -> pyct.NDArray:
-        return arr.reshape(-1, *self.arg_shape).map_overlap(
-            self.stencil_adjoint_dask,
-            depth=self._depth_adjoint,
-            boundary=self._boundary,
-            dtype=pycrt.getPrecision().value,
-        )
-
-    def _adjoint_cupy(self, arr: pyct.NDArray) -> pyct.NDArray:
-        out_shape = arr.shape
-        arr, out = self._pad_and_allocate_output(arr, direction="adjoint")
-        blockspergrid = tuple([math.ceil(arr.shape[i] / tpb) for i, tpb in enumerate(self.threadsperblock)])
-        self.stencil_adjoint[blockspergrid, self.threadsperblock](arr, out)
-        return self._trim_adjoint(out).reshape(out_shape)
-
-    @pycrt.enforce_precision(i="arr")
-    @pycu.redirect("arr", DASK=_apply_dask, CUPY=_apply_cupy)
+    @pycrt.enforce_precision(i="arr", o=True)
     def apply(self, arr: pyct.NDArray) -> pyct.NDArray:
         r"""
         Parameters
@@ -736,10 +707,13 @@ class Stencil(pyco.SquareOp):
         out: NDArray
             NDArray with same shape as the input NDArray, correlated with kernel.
         """
-        return self._apply(arr)
+        if (arr.dtype != self.stencil_coefs.dtype) and self._enable_warnings:
+            msg = "Computation may not be performed at the requested precision."
+            warnings.warn(msg, pycuw.PrecisionWarning)
 
-    @pycrt.enforce_precision(i="arr")
-    @pycu.redirect("arr", DASK=_adjoint_dask, CUPY=_adjoint_cupy)
+        return self._apply_dispatch(arr)
+
+    @pycrt.enforce_precision(i="arr", o=True)
     def adjoint(self, arr: pyct.NDArray) -> pyct.NDArray:
         r"""
         Parameters
@@ -752,6 +726,77 @@ class Stencil(pyco.SquareOp):
         out: NDArray
             NDArray with same shape as the input NDArray, convolved with kernel.
         """
+
+        if (arr.dtype != self.stencil_coefs.dtype) and self._enable_warnings:
+            msg = "Computation may not be performed at the requested precision."
+            warnings.warn(msg, pycuw.PrecisionWarning)
+
+        if frozenset(self._boundary.values()).isdisjoint(frozenset(("reflect", "nearest"))):
+            return self._adjoint_dispatch(arr)
+        else:
+            # If boundary conditions are "reflect" or "nearest", the adjoint cannot be formed via a stencil.
+            # In that case, a sparse matrix is created an applied.
+            # TODO should we store this sparse matrix for when using iterative agorithms?
+            A = self.as_sparse_array(xp=pycu.get_array_module(self.stencil_coefs), dtype=arr.dtype).T
+            return (A.dot(arr.reshape(-1, np.prod(self.arg_shape)).T)).T.reshape(arr.shape)
+
+    def _apply(self, arr: pyct.NDArray) -> pyct.NDArray:
+        return self._trim_apply(
+            self.stencil(self._pad(arr.reshape(-1, *self.arg_shape))).reshape(-1, self._trim_apply.dim)
+        ).reshape(arr.shape)
+
+    def _apply_dask(self, arr: pyct.NDArray) -> pyct.NDArray:
+        return (
+            arr.reshape(-1, *self.arg_shape)
+            .map_overlap(self.stencil_dask, depth=self._depth, boundary=self._boundary, dtype=arr.dtype)
+            .reshape(arr.shape)
+        )
+
+    def _apply_cupy(self, arr: pyct.NDArray) -> pyct.NDArray:
+        out_shape = arr.shape
+        arr, out = self._pad_and_allocate_output(arr.reshape(-1, *self.arg_shape))
+        # Cuda grid cannot have more than 3D. In the case of arg_shape with 3D, the cuda grid loops across the 3D and
+        # looping over stacking dimension is done within the following Python list comprehension.
+        blockspergrid = self._get_blockspergrid(arr.shape)
+        self.stencil[blockspergrid, self.threadsperblock](arr, out) if len(self.arg_shape) < 3 else [
+            self.stencil[blockspergrid, self.threadsperblock](arr[i], out[i]) for i in range(arr.shape[0])
+        ]
+        return self._trim_apply(out.reshape(-1, self._trim_apply.dim)).reshape(out_shape)
+
+    def _adjoint(self, arr: pyct.NDArray) -> pyct.NDArray:
+        return self._trim_adjoint(
+            self.stencil_adjoint(self._pad(arr.reshape(-1, *self.arg_shape), direction="adjoint")).reshape(
+                -1, self._trim_adjoint.dim
+            )
+        ).reshape(arr.shape)
+
+    def _adjoint_dask(self, arr: pyct.NDArray) -> pyct.NDArray:
+        return (
+            arr.reshape(-1, *self.arg_shape)
+            .map_overlap(
+                self.stencil_adjoint_dask,
+                depth=self._depth_adjoint,
+                boundary=self._boundary,
+                dtype=arr.dtype,
+            )
+            .reshape(arr.shape)
+        )
+
+    def _adjoint_cupy(self, arr: pyct.NDArray) -> pyct.NDArray:
+        out_shape = arr.shape
+        arr, out = self._pad_and_allocate_output(arr.reshape(-1, *self.arg_shape), direction="adjoint")
+        blockspergrid = self._get_blockspergrid(arr.shape)
+        self.stencil_adjoint[blockspergrid, self.threadsperblock](arr, out) if len(self.arg_shape) < 3 else [
+            self.stencil_adjoint[blockspergrid, self.threadsperblock](arr[i], out[i]) for i in range(arr.shape[0])
+        ]
+        return self._trim_adjoint(out.reshape(-1, self._trim_adjoint.dim)).reshape(out_shape)
+
+    @pycu.redirect("arr", DASK=_apply_dask, CUPY=_apply_cupy)
+    def _apply_dispatch(self, arr: pyct.NDArray) -> pyct.NDArray:
+        return self._apply(arr)
+
+    @pycu.redirect("arr", DASK=_adjoint_dask, CUPY=_adjoint_cupy)
+    def _adjoint_dispatch(self, arr: pyct.NDArray) -> pyct.NDArray:
         return self._adjoint(arr)
 
     def _make_stencils_cpu(self, stencil_coefs: pyct.NDArray, **kwargs) -> None:
