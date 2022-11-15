@@ -617,6 +617,9 @@ class Stencil(pyco.SquareOp):
         out_da_adj = stencil.adjoint(data_da).reshape(nsamples, *data_shape).compute()
         out_cu_adj = stencil_cu.adjoint(data_cu).reshape(nsamples, *data_shape).get()
 
+    Note that to perform stencil operations on GPU NDArrays, the stencil has to be instantiated with GPU kernel
+    coefficients.
+
     Remark 1
     --------
     The :py:class:`~pycsou.operator.linop.base.Stencil` class allows to perform both correlation and convolution. By default,
@@ -750,7 +753,6 @@ class Stencil(pyco.SquareOp):
         out: NDArray
             NDArray with same shape as the input NDArray, convolved with kernel.
         """
-
         if (arr.dtype != self.stencil_coefs.dtype) and self._enable_warnings:
             msg = "Computation may not be performed at the requested precision."
             warnings.warn(msg, pycuw.PrecisionWarning)
@@ -760,8 +762,13 @@ class Stencil(pyco.SquareOp):
         else:
             # If boundary conditions are "reflect" or "nearest", the adjoint cannot be formed via a stencil.
             # In that case, a sparse matrix is created an applied.
-            # TODO should we store this sparse matrix for when using iterative agorithms?
-            A = self.as_sparse_array(xp=pycu.get_array_module(self.stencil_coefs), dtype=arr.dtype).T
+            # TODO should we store this sparse matrix for when using iterative algorithms?
+            msg = (
+                f"Adjoint computation with 'reflect' or 'nearest' boundary conditions is based on sparse matrix "
+                f"multiplication instead of Numba stencils and thus has decreased performance. "
+            )
+            warnings.warn(msg)
+            A = self.as_sparse_array(xp=pycu.get_array_module(arr), dtype=arr.dtype).T
             return (A.dot(arr.reshape(-1, np.prod(self.arg_shape)).T)).T.reshape(arr.shape)
 
     def asarray(self, **kwargs) -> pyct.NDArray:
