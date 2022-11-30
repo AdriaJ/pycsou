@@ -106,7 +106,7 @@ class _BaseDifferential(pycob.Stencil):
             """
             if not isinstance(param, cabc.Sequence) or isinstance(param, str):
                 param = (param,)
-            assert (len(param) == 1) | (len(param) == len(arg_shape)), (
+            assert (len(param) == 1) | (len(param) <= len(arg_shape)), (
                 f"The length of {param_name} cannot be larger than the"
                 f"number of dimensions ({len(arg_shape)}) defined by `arg_shape`"
             )
@@ -419,7 +419,9 @@ class FiniteDifference(_BaseDifferential):
             axis=axis,
         )
         kernel, center = self._create_kernel(self.axis)
-        super(FiniteDifference, self).__init__(kernel=kernel, center=center, arg_shape=arg_shape, boundary=boundary)
+        super(FiniteDifference, self).__init__(
+            kernel=kernel, center=center, arg_shape=arg_shape, boundary=boundary, gpu=gpu, dtype=dtype
+        )
 
     def _fill_coefs(self, i: pyct.Integer) -> typ.Tuple[list, pyct.NDArray, pyct.Integer]:
         r"""
