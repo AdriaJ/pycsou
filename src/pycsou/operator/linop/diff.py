@@ -93,9 +93,9 @@ class _BaseDifferential(pycob.Stencil):
         param2: typ.Union[pyct.Real, typ.Tuple[pyct.Real, ...]],
         param2_name: str,
         arg_shape: pyct.Shape,
+        sampling: pyct.Real,
         axis: typ.Union[pyct.Integer, typ.Tuple] = None,
     ):
-
         r"""
         Ensures that inputs have the appropriate shape and values.
         """
@@ -113,10 +113,14 @@ class _BaseDifferential(pycob.Stencil):
             return param
 
         order = _ensure_tuple(order, param_name="order")
+        sampling = _ensure_tuple(sampling, param_name="sampling")
+        if len(sampling) == 1:
+            sampling = sampling * len(arg_shape)
+        assert all([_ > 0 for _ in order]), "Order must be strictly positive"
+        assert all([_ > 0 for _ in sampling]), "Sampling must be strictly positive"
+
         _param1 = _ensure_tuple(param1, param_name=param1_name)
         _param2 = _ensure_tuple(param2, param_name=param2_name)
-
-        assert all([o > 0 for o in order]), "Order must be strictly positive"
 
         if param1_name == "sigma":
             assert all([p >= 0 for p in _param1]), "Sigma must be strictly positive"
@@ -153,6 +157,7 @@ class _BaseDifferential(pycob.Stencil):
 
         return (
             order,
+            sampling,
             _param1,
             _param2,
             axis,
@@ -383,6 +388,7 @@ class FiniteDifference(_BaseDifferential):
         boundary: typ.Optional[typ.Union[pyct.Real, str, tuple, dict]] = None,
         gpu: bool = False,
         dtype: typ.Optional[pyct.DType] = None,
+        sampling: typ.Union[pyct.Real, tuple[pyct.Real, ...]] = 1,
     ):
         """
         Parameters
@@ -406,10 +412,12 @@ class FiniteDifference(_BaseDifferential):
             Whether to define the differential operator for GPU NDArrays or not (defaults definition for CPU NDArrays).
         dtype: pyct.DType
             Working precision of the linear operator.
+        sampling: int, tuple
+            Sampling step (i.e. distance between two consecutive elements of an array).
         """
 
         self.arg_shape = arg_shape
-        self.order, self._param1, self._param2, self.axis = self._sanitize_init_kwargs(
+        self.order, self.sampling, self._param1, self._param2, self.axis = self._sanitize_init_kwargs(
             order=order,
             param1=diff_type,
             param1_name="diff_type",
@@ -417,6 +425,7 @@ class FiniteDifference(_BaseDifferential):
             param2_name="accuracy",
             arg_shape=arg_shape,
             axis=axis,
+            sampling=sampling,
         )
         kernel, center = self._create_kernel(self.axis)
         super(FiniteDifference, self).__init__(
@@ -428,7 +437,9 @@ class FiniteDifference(_BaseDifferential):
         Defines kernel elements.
         """
         stencil_ids = self._compute_ids(order=self.order[i], diff_type=self._param1[i], accuracy=self._param2[i])
-        stencil_coefs = self._compute_coefficients(stencil_ids=stencil_ids, order=self.order[i])
+        stencil_coefs = self._compute_coefficients(
+            stencil_ids=stencil_ids, order=self.order[i], sampling=self.sampling[i]
+        )
         center = stencil_ids.index(0)
         return stencil_ids, stencil_coefs, center
 
@@ -454,7 +465,7 @@ class FiniteDifference(_BaseDifferential):
         return ids.tolist()
 
     @staticmethod
-    def _compute_coefficients(stencil_ids: list, order: pyct.Integer) -> pyct.NDArray:
+    def _compute_coefficients(stencil_ids: list, order: pyct.Integer, sampling: pyct.Real) -> pyct.NDArray:
         """
         Computes the finite difference coefficients based on the order and indices.
         """
@@ -466,6 +477,7 @@ class FiniteDifference(_BaseDifferential):
         vec = np.zeros(len(stencil_ids), dtype=pycrt.getPrecision().value)
         vec[order] = math.factorial(order)
         coefs = np.linalg.solve(stencil_mat, vec)
+        coefs /= sampling**order
         return coefs
 
 
@@ -605,6 +617,7 @@ class GaussianDerivative(_BaseDifferential):
         boundary: typ.Optional[typ.Union[pyct.Real, str, tuple, dict]] = None,
         gpu: bool = False,
         dtype: typ.Optional[pyct.DType] = None,
+        sampling: typ.Union[pyct.Real, tuple[pyct.Real, ...]] = 1,
     ):
         """
         Parameters
@@ -629,9 +642,11 @@ class GaussianDerivative(_BaseDifferential):
             Whether to define the differential operator for GPU NDArrays or not (defaults definition for CPU NDArrays).
         dtype: pyct.DType
             Working precision of the linear operator.
+        sampling: int, tuple
+            Sampling step (i.e. distance between two consecutive elements of an array).
         """
         self.arg_shape = arg_shape
-        self.order, self._param1, self._param2, self.axis = self._sanitize_init_kwargs(
+        self.order, self.sampling, self._param1, self._param2, self.axis = self._sanitize_init_kwargs(
             order=order,
             param1=sigma,
             param1_name="sigma",
@@ -639,6 +654,7 @@ class GaussianDerivative(_BaseDifferential):
             param2_name="truncate",
             arg_shape=arg_shape,
             axis=axis,
+            sampling=sampling,
         )
 
         kernel, center = self._create_kernel(self.axis)
@@ -652,18 +668,24 @@ class GaussianDerivative(_BaseDifferential):
         """
         # make the radius of the filter equal to `truncate` standard deviations
         radius = int(self._param2[i] * float(self._param1[i]) + 0.5)
-        stencil_coefs = self._gaussian_kernel1d(sigma=self._param1[i], order=self.order[i], radius=radius)
+        stencil_coefs = self._gaussian_kernel1d(
+            sigma=self._param1[i], order=self.order[i], sampling=self.sampling, radius=radius
+        )
         stencil_ids = [i for i in range(-radius, radius + 1)]
         return stencil_ids, stencil_coefs, radius
 
     @staticmethod
-    def _gaussian_kernel1d(sigma, order: pyct.Integer, radius: pyct.Integer) -> pyct.NDArray:
+    def _gaussian_kernel1d(
+        sigma: pyct.Real, order: pyct.Integer, sampling: pyct.Real, radius: pyct.Integer
+    ) -> pyct.NDArray:
         """
         Computes a 1-D Gaussian convolution kernel.
         Wraps scipy.ndimage.filters._gaussian_kernel1d
         It flips the output because the original kernel is meant for convolution instead of correlation.
         """
-        return np.flip(scif._gaussian_kernel1d(sigma, order, radius))
+        coefs = np.flip(scif._gaussian_kernel1d(sigma, order, radius))
+        coefs /= sampling**order
+        return coefs
 
 
 class PartialDerivative(_BaseDifferential):
