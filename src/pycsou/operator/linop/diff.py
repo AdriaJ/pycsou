@@ -12,6 +12,7 @@ import pycsou.operator.linop.base
 import pycsou.operator.linop.base as pycob
 import pycsou.runtime as pycrt
 import pycsou.util as pycu
+import pycsou.util.deps as pycd
 import pycsou.util.ptype as pyct
 
 try:
@@ -52,6 +53,8 @@ class _BaseDifferential(pycob.Stencil):
         center: pyct.NDArray,
         arg_shape: pyct.Shape,
         boundary: typ.Optional[typ.Union[pyct.Real, str, tuple, dict]] = None,
+        gpu: bool = False,
+        dtype: typ.Optional[pyct.DType] = None,
     ):
         r"""
         Parameters
@@ -61,7 +64,22 @@ class _BaseDifferential(pycob.Stencil):
         arg_shape: tuple
         boundary: real, str, tuple, or dict , keyword only.
             How to handle the boundaries. (see :py:class:`~pycsou.operator.linop.base.Stencil`) for more information.
+        gpu: bool
+            Whether to define the differential operator for GPU NDArrays or not (defaults definition for CPU NDArrays).
+        dtype: pyct.DType
+            Working precision of the linear operator.
         """
+
+        if dtype is None:
+            dtype = pycrt.getPrecision().value
+
+        if gpu:
+            assert pycd.CUPY_ENABLED
+            import cupy as xp
+        else:
+            import numpy as xp
+
+        kernel = xp.array(kernel, dtype=dtype)
 
         super(_BaseDifferential, self).__init__(
             stencil_coefs=kernel, center=center, arg_shape=arg_shape, boundary=boundary
@@ -363,6 +381,8 @@ class FiniteDifference(_BaseDifferential):
         axis: typ.Union[pyct.Integer, tuple[pyct.Integer, ...], None] = None,
         accuracy: typ.Union[pyct.Integer, tuple[pyct.Integer, ...]] = 1,
         boundary: typ.Optional[typ.Union[pyct.Real, str, tuple, dict]] = None,
+        gpu: bool = False,
+        dtype: typ.Optional[pyct.DType] = None,
     ):
         """
         Parameters
@@ -382,6 +402,10 @@ class FiniteDifference(_BaseDifferential):
             Approximation accuracy to the derivative. See `Notes`.
         boundary: real, str, tuple, or dict , keyword only.
             How to handle the boundaries. (see :py:class:`~pycsou.operator.linop.base.Stencil`) for more information.
+        gpu: bool
+            Whether to define the differential operator for GPU NDArrays or not (defaults definition for CPU NDArrays).
+        dtype: pyct.DType
+            Working precision of the linear operator.
         """
 
         self.arg_shape = arg_shape
@@ -577,6 +601,8 @@ class GaussianDerivative(_BaseDifferential):
         axis: typ.Union[pyct.Integer, tuple[pyct.Integer, ...], None] = None,
         truncate: typ.Union[pyct.Real, tuple[pyct.Real, ...]] = 3.0,
         boundary: typ.Optional[typ.Union[pyct.Real, str, tuple, dict]] = None,
+        gpu: bool = False,
+        dtype: typ.Optional[pyct.DType] = None,
     ):
         """
         Parameters
@@ -597,6 +623,10 @@ class GaussianDerivative(_BaseDifferential):
             Defaults to 3.0.
         boundary: real, str, tuple, or dict , keyword only.
             How to handle the boundaries. (see :py:class:`~pycsou.operator.linop.base.Stencil`) for more information.
+        gpu: bool
+            Whether to define the differential operator for GPU NDArrays or not (defaults definition for CPU NDArrays).
+        dtype: pyct.DType
+            Working precision of the linear operator.
         """
         self.arg_shape = arg_shape
         self.order, self._param1, self._param2, self.axis = self._sanitize_init_kwargs(
@@ -610,7 +640,9 @@ class GaussianDerivative(_BaseDifferential):
         )
 
         kernel, center = self._create_kernel(self.axis)
-        super(GaussianDerivative, self).__init__(kernel=kernel, center=center, arg_shape=arg_shape, boundary=boundary)
+        super(GaussianDerivative, self).__init__(
+            kernel=kernel, center=center, arg_shape=arg_shape, boundary=boundary, gpu=gpu, dtype=dtype
+        )
 
     def _fill_coefs(self, i: pyct.Integer) -> typ.Tuple[list, pyct.NDArray, pyct.Integer]:
         r"""
