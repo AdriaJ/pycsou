@@ -437,7 +437,7 @@ class FiniteDifference(_BaseDifferential):
         """
         if diff_type == "central":
             n_coefs = 2 * ((order + 1) // 2) - 1 + accuracy
-            ids = np.arange(-n_coefs // 2, n_coefs // 2 + 1, dtype=int)
+            ids = np.arange(-(n_coefs // 2), n_coefs // 2 + 1, dtype=int)
         else:
             n_coefs = order + accuracy
             if diff_type == "forward":
