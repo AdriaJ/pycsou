@@ -4,6 +4,7 @@ import typing as typ
 import warnings
 
 import pycsou.abc as pyca
+import pycsou.abc.operator as pyco
 import pycsou.operator.func as pycf
 import pycsou.operator.linop as pyclo
 import pycsou.opt.stop as pycos
@@ -18,7 +19,6 @@ __all__ = [
     *("DavisYin", "DY"),
     *("DouglasRachford", "DR"),
     "ADMM",
-    "QuadraticADMM",
     *("ForwardBackward", "FB"),
     *("ProximalPoint", "PP"),
 ]
@@ -88,7 +88,7 @@ class _PrimalDualSplitting(pyca.Solver):
         tuning_strategy: typ.Literal[1, 2, 3] = 1,
     ):
         mst = self._mstate  # shorthand
-        mst["x"] = x0 if x0.ndim > 1 else x0.reshape(1, -1)
+        mst["x"] = x0
         mst["z"] = self._set_dual_variable(z0)
         self._tuning_strategy = tuning_strategy
         gamma = self._set_gamma(tuning_strategy)
@@ -139,7 +139,7 @@ class _PrimalDualSplitting(pyca.Solver):
             Lipschitz constant.
         """
         if beta is None:
-            if math.isfinite(dl := self._f._diff_lipschitz):
+            if math.isfinite(dl := self._f.diff_lipschitz()):
                 return pycrt.coerce(dl)
             else:
                 msg = "beta: automatic inference not supported for operators with unbounded Lipschitz gradients."
@@ -159,7 +159,7 @@ class _PrimalDualSplitting(pyca.Solver):
         if z is None:
             return self._K(self._mstate["x"].copy())
         else:
-            return z if z.ndim > 1 else z.reshape(1, -1)
+            return z
 
     def _set_gamma(self, tuning_strategy: typ.Literal[1, 2, 3]) -> pyct.Real:
         r"""
@@ -170,7 +170,7 @@ class _PrimalDualSplitting(pyca.Solver):
         float
             Gamma parameter.
         """
-        return pycrt.coerce(self._beta) if tuning_strategy != 2 else pycrt.coerce(self._beta / 2)
+        return pycrt.coerce(self._beta) if tuning_strategy != 2 else pycrt.coerce(self._beta / 1.9)
 
     def _set_step_sizes(
         self, tau: typ.Optional[pyct.Real], sigma: typ.Optional[pyct.Real], gamma: pyct.Real
@@ -373,7 +373,7 @@ class CondatVu(_PrimalDualSplitting):
        >>> downsampling = DownSampling(size=x.size, downsampling_factor=3)
        >>> downsampling.lipschitz()
        >>> y = downsampling(x)
-       >>> l22_loss = (1 / 2) * SquaredL2Norm().argshift(-y)
+       >>> l22_loss = (1 / 2) * SquaredL2Norm(y.size).argshift(-y)
        >>> fidelity = l22_loss * downsampling
        >>> H = 0.1 * L1Norm()
 
@@ -481,7 +481,7 @@ class CondatVu(_PrimalDualSplitting):
                         raise ValueError(msg)
         delta = (
             2
-            if (self._beta == 0 or (isinstance(self._f, pycf.QuadraticFunc) and gamma <= self._beta))
+            if (self._beta == 0 or (isinstance(self._f, pyco.QuadraticFunc) and gamma <= self._beta))
             else 2 - self._beta / (2 * gamma)
         )
         return pycrt.coerce(tau), pycrt.coerce(sigma), pycrt.coerce(delta)
@@ -652,7 +652,7 @@ class PD3O(_PrimalDualSplitting):
        >>> downsampling = DownSampling(size=x.size, downsampling_factor=3)
        >>> downsampling.lipschitz()
        >>> y = downsampling(x)
-       >>> l22_loss = (1 / 2) * SquaredL2Norm().argshift(-y)
+       >>> l22_loss = (1 / 2) * SquaredL2Norm(dim=y.size).argshift(-y)
        >>> fidelity = l22_loss * downsampling
        >>> H = 0.1 * L1Norm()
 
@@ -685,7 +685,12 @@ class PD3O(_PrimalDualSplitting):
         tuning_strategy: typ.Literal[1, 2, 3] = 1,
     ):
         super().m_init(x0=x0, z0=z0, tau=tau, sigma=sigma, rho=rho, tuning_strategy=tuning_strategy)
-        self._mstate["u"] = x0 if x0.ndim > 1 else x0.reshape(1, -1)
+
+        # if x0 == u0 the first step wouldn't change x and the solver would stop at the first iteration
+        if self._g._name == self._h._name == "NullFunc":
+            self._mstate["u"] = x0 * 1.01
+        else:
+            self._mstate["u"] = x0.copy()
 
     def m_step(
         self,
@@ -722,7 +727,7 @@ class PD3O(_PrimalDualSplitting):
         sigma = None if sigma == 0 else sigma
 
         if (tau is not None) and (sigma is None):
-            assert 0 < tau <= 1 / gamma, f"tau must be positive and smaller than 1/gamma."
+            assert 0 < tau <= 1 / gamma, "tau must be positive and smaller than 1/gamma."
             if self._h._name == "NullFunc":
                 sigma = 0
             else:
@@ -996,7 +1001,7 @@ class LorisVerhoeven(PD3O):
             Sensible primal/dual step sizes and value of the parameter :math:`delta`.
         """
         tau, sigma, _ = super()._set_step_sizes(tau=tau, sigma=sigma, gamma=gamma)
-        delta = 2 if (self._beta == 0 or isinstance(self._f, pycf.QuadraticFunc)) else 2 - self._beta / (2 * gamma)
+        delta = 2 if (self._beta == 0 or isinstance(self._f, pyco.QuadraticFunc)) else 2 - self._beta / (2 * gamma)
         return pycrt.coerce(tau), pycrt.coerce(sigma), pycrt.coerce(delta)
 
 
@@ -1096,7 +1101,7 @@ class DavisYin(PD3O):
             Sensible primal/dual step sizes and value of :math:`\delta`.
         """
         if tau is not None:
-            assert 0 < tau <= 1 / gamma, f"tau must be positive and smaller than 1/gamma."
+            assert 0 < tau <= 1 / gamma, "tau must be positive and smaller than 1/gamma."
         else:
             tau = 1.0 if self._beta == 0 else 1 / gamma
 
@@ -1167,7 +1172,10 @@ def DouglasRachford(
     obj.__repr__ = lambda _: "DouglasRachford"
 
     def _set_step_sizes_custom(
-        tau: typ.Optional[pyct.Real], sigma: typ.Optional[pyct.Real], gamma: pyct.Real
+        obj: typ.Type[_PrimalDualSplitting],
+        tau: typ.Optional[pyct.Real],
+        sigma: typ.Optional[pyct.Real],
+        gamma: pyct.Real,
     ) -> typ.Tuple[pyct.Real, pyct.Real, pyct.Real]:
         tau = 1.0 if tau is None else tau
         delta = 2.0
@@ -1182,72 +1190,267 @@ DR = DouglasRachford  #: Alias of :py:class:`~pycsou.opt.solver.pds.DouglasRachf
 
 class ADMM(_PDS):
     r"""
-    Alternating Direction Method of Multipliers algorithm.
+    Alternating Direction Method of Multipliers.
 
-    :: todo add example and test
-
-    The *Alternating Direction Method of Multipliers (ADMM)* method can be used to solve problems of the form:
+    The *Alternating Direction Method of Multipliers (ADMM)* can be used to solve problems of the form:
 
     .. math::
 
-       \min_{\mathbf{x}\in\mathbb{R}^N} \quad \mathcal{G}(\mathbf{x})\;\;+\;\;\mathcal{H}(\mathbf{x}),
+       \min_{\mathbf{x}\in\mathbb{R}^N} \quad \mathcal{F}(\mathbf{x})\;\;+\;\;\mathcal{H}(\mathbf{K}\mathbf{x}),
 
-    where:
+    where (see Remark 2 for additional details on the assumptions):
 
-    * :math:`\mathcal{G}:\mathbb{R}^N\rightarrow \mathbb{R}\cup\{+\infty\}` and :math:`\mathcal{H}:\mathbb{R}^M\rightarrow \mathbb{R}\cup\{+\infty\}` are two *proper*, *lower semicontinuous* and *convex functions* with *simple proximal operators*.
+    * :math:`\mathcal{F}:\mathbb{R}^N\rightarrow \mathbb{R}\cup\{+\infty\}` is a *proper*, *lower semicontinuous* and
+      *convex functional* potentially with *simple proximal operator* or *Lipschitz-differentiable*,
+    * :math:`\mathcal{H}:\mathbb{R}^M\rightarrow \mathbb{R}\cup\{+\infty\}` is a *proper*, *lower semicontinuous* and
+      *convex functional* with *simple proximal operator*,
+    * :math:`\mathbf{K}:\mathbb{R}^N\rightarrow \mathbb{R}^M` is a *linear operator* with **operator norm**:
+      :math:`\Vert{\mathbf{K}}\Vert_2`,
     * The problem is *feasible* --i.e. there exists at least one solution.
 
     **Remark 1:**
+    The algorithm is still valid if one of the terms :math:`\mathcal{F}`, :math:`\mathcal{H}` or :math:`\mathbf{K}` is
+    zero or identity, respectivley. Note that when :math:`\mathbf{K}` is identity, ADMM is equivalent to the :py:func:`~pycsou.opt.solver.pds.DouglasRachford`
+    method  (up to a change of variable, see [PSA]_ for a derivation).
 
-    The algorithm is still valid if one of the terms :math:`\mathcal{G}` or :math:`\mathcal{H}` is zero.
 
     **Remark 2:**
-    The *Alternating Direction Method of Multipliers (ADMM)* method is equivalent to the *Douglas Rachford (DR)* method
-    with :math:`\rho = 1` and :math:`\sigma = \frac{1}{\tau}` (see section 5.3 of [PSA]_). However, ADMM gives access to
-    two primal iterates. The latter both converge to a solution to the optimization problem but belong to :math:`\operatorname{dom}\{\mathcal{G}\}`
-    and :math:`\operatorname{dom}\{\mathcal{H}\}` respectively. When :math:`\mathcal{G}` and :math:`\mathcal{H}` are indicator functions of convex sets,
-    the ADMM algorithm is equivalent to Djykstra's alternating projection method, with each iterates belonging to one of the two convex sets.
+    This is an implementation of the algorithm described in Section 5.4 of [PSA]_, which handles the non-smooth
+    composite term :math:`\mathcal{H}(\mathbf{K}\mathbf{x})` by means of a change of variable and an infimal
+    postcomposition trick. The update equation of this algorithm involves the following
+    :math:`\mathbf{x}`-minimization step
+
+    .. math::
+        :label: eq:x_minimization
+
+        \mathcal{V} = \operatorname*{arg\,min}_{\mathbf{x} \in \mathbb{R^N}} \quad \mathcal{F}(\mathbf{x}) + \frac1{2 \tau}
+        \Vert \mathbf{K} \mathbf{x} - \mathbf{a} \Vert_2^2,
+
+    where :math:`\tau` is the primal step size and :math:`\mathbf{a} \in \mathbb{R}^M` is an iteration-dependant vector.
+    The following cases are covered in this implementation:
+
+    * :math:`\mathbf{K}` is ``None`` (`i.e.`, the identity operator) and :math:`\mathcal{F}` is a
+      :py:class:`~pycsou.abc.operator.ProxFunc`. Then, :math:numref:`eq:x_minimization` has a single solution provided by the
+      proximal operator of :math:`\mathcal{F}`. This yields the *classical ADMM algorithm* described in Section
+      5.3 of [PSA]_ (i.e. without the postcomposition trick).
+
+    * :math:`\mathcal{F}` is a :py:class:`~pycsou.abc.operator.QuadraticFunc`, that is
+      :math:`\mathcal{F}(\mathbf{x})=\frac{1}{2} \langle\mathbf{x}, \mathbf{Q}\mathbf{x}\rangle + \mathbf{c}^T\mathbf{x} + t`,
+      where :math:`\mathbf{Q} \in \mathbb{R}^{N \times N}` is the Hessian of
+      :math:`\mathcal{F}`, :math:`\mathbf{b} \in \mathbb{R}^N` and :math:`t>0`. Then, the unique
+      solution to :math:numref:`eq:x_minimization` can be obtained by solving a linear system of the form
+
+      .. math::
+          :label: eq:linear_system
+
+          \Big( \mathbf{Q} + \frac1\tau \mathbf{K}^* \mathbf{K} \Big) \mathbf{x} =
+          \frac1\tau \mathbf{K}^\ast\mathbf{a}-\mathbf{c}, \qquad \mathbf{x} \in \mathbb{R}^N.
+
+      This linear system
+      is solved via a sub-iterative :py:class:`~pycsou.opt.solver.cg.CG` algorithm involving the repeated
+      application of :math:`\mathbf{Q}` and of the Gramiam of :math:`\mathbf{K}`. This sub-iterative scheme can therefore
+      be computationally intensive if these operators do not admit fast matrix-free implementations.
+
+    * :math:`\mathcal{F}` is a :py:class:`~pycsou.abc.operator.DiffFunc`.
+      Then, :math:numref:`eq:x_minimization` is
+      solved via a sub-iterative :py:class:`~pycsou.opt.solver.nlcg.NLCG` algorithm, which involves the repeated
+      evaluation of the gradient of :math:`\mathcal{F}` and the Gramian of :math:`\mathbf{K}`. Again, this scenario
+      can be costly if these operators cannot be evaluated with fast algorithms. In this scenario, the use of multiple
+      initial points in the ``fit()`` method is not supported.
+
+    The user may also provide a *custom* callable solver :math:`s: \mathbb{R}^M \times \mathbb{R} \to \mathbb{R}^N`, taking
+    as input :math:`(\mathbf{a}, \tau)` and solving
+    :math:numref:`eq:x_minimization`, i.e., :math:`s(\mathbf{a}, \tau) \in \mathcal{V}` (see `Example` section).
+    If :py:class:`~pycsou.opt.solver.pds.ADMM` is initialized with such a solver, then the latter is used to solve
+    :math:numref:`eq:x_minimization` regardless of whether one of the above-mentioned cases is met.
+
+
+    **Remark 3:**
+    Note that, unlike traditional implementations of ADMM, this implementation supports the
+    possibility of relaxation (i.e. :math:`\rho\neq 1`), .
 
     **Initialization parameters of the class:**
 
-    g: ProxFunc | None
-        Proximable function, instance of :py:class:`~pycsou.abc.operator.ProxFunc`.
+    f: ProxFunc | DiffFunc | None
+        Functional, instance of :py:class:`~pycsou.abc.operator.ProxFunc` or :py:class:`~pycsou.abc.operator.DiffFunc`.
     h: ProxFunc | None
-        Proximable function, instance of :py:class:`~pycsou.abc.operator.ProxFunc`.
+        Proximable functional, instance of :py:class:`~pycsou.abc.operator.ProxFunc`.
+    K: LinOp | None
+        Linear operator, instance of :py:class:`~pycsou.abc.operator.LinOp`.
+    solver: Callable[[NDArray, float], NDArray] | None
+        Optional callable function (with `Numpy signature <https://numpy.org/neps/nep-0020-gufunc-signature-enhancement.html>`_
+        ``(n), (1) -> (n)`` ) that solves the :math:`\mathbf{x}`-minimization step :math:numref:`eq:x_minimization` with a custom solver.
+    solver_kwargs: dict | None
+        Optional keyword arguments to be passed to the ``__init__`` method of the sub-iterative :py:class:`~pycsou.opt.solver.cg.CG` or
+        :py:class:`~pycsou.opt.solver.cg.NLCG` solvers (see Remark 2). Ignored if custom ``solver`` is provided.
 
 
     **Parameterization** of the ``fit()`` method:
 
     x0: NDArray
         (..., N) initial point(s) for the primal variable.
-    z0: NDArray
+    z0: NDArray | None
         (..., N) initial point(s) for the dual variable.
         If ``None`` (default), then use ``K(x0)`` as the initial point for the dual variable.
     tau: Real | None
         Primal step size.
     rho: Real | None
-        Momentum parameter.
+        Momentum parameter for relaxation.
     tuning_strategy: [1, 2, 3]
         Strategy to be employed when setting the hyperparameters (default to 1). See base class for more details.
+    solver_kwargs: dict | None
+        Optional keyword arguments to be passed to the ``fit()`` method of the sub-iterative :py:class:`~pycsou.opt.solver.cg.CG` or
+        :py:class:`~pycsou.opt.solver.cg.NLCG` solvers (see Remark 2). Ignored if custom ``solver`` is provided.
 
+    Example
+    -------
+    Consider the following optimization problem:
+
+    .. math::
+
+       \min_{\mathbf{x}\in\mathbb{R}^N}\frac{1}{2}\left\|\mathbf{y}-\mathbf{G}\mathbf{x}\right\|_2^2\quad+\quad\lambda \|\mathbf{D}\mathbf{x}\|_1,
+
+    with :math:`\mathbf{D}\in\mathbb{R}^{N\times N}` the discrete second-order derivative operator,
+    :math:`\mathbf{G}\in\mathbb{R}^{M\times N}, \, \mathbf{y}\in\mathbb{R}^M, \lambda>0.` This problem can be solved
+    via ADMM with :math:`\mathcal{F}(\mathbf{x})= \frac{1}{2}\left\|\mathbf{y}-\mathbf{G}\mathbf{x}\right\|_2^2`,
+    :math:`\mathcal{H}(\mathbf{x})=\lambda \|\mathbf{D}\mathbf{x}\|_1,` and :math:`\mathbf{K}=\mathbf{D}`. The functional
+    :math:`\mathcal{F}` begin quadratic, the :math:`\mathbf{x}`-minimization step consists in solving a linear system of
+    the form :math:numref:`eq:linear_system`. Here, we demonstrate how to provide a custom solver, which consists in
+    applying a matrix inverse, for this step. Otherwise, a sub-iterative :py:class:`~pycsou.opt.solver.cg.CG` algorithm
+    would have been used automatically instead.
+
+    .. plot::
+
+        import matplotlib.pyplot as plt
+        import numpy as np
+        import scipy as sp
+
+        import pycsou.abc as pyca
+        import pycsou.operator as pycop
+        import pycsou.operator.func.norm as pycn
+        from pycsou.opt.solver.pds import ADMM
+
+        N = 100  # Dimension of the problem
+
+        # Generate piecewise-linear ground truth
+        x_gt = np.array([10, 25, 60, 90])  # Knot locations
+        a_gt = np.array([2, -4, 3, -2])  # Amplitudes of the knots
+        gt = np.zeros(N)  # Ground-truth signal
+        for n in range(len(x_gt)):
+            gt[x_gt[n]:] += a_gt[n] * np.arange(N - x_gt[n]) / N
+
+        # Generate data (noisy samples at random locations)
+        M = 20  # Number of data points
+        rng = np.random.default_rng(seed=0)  # For reproducibility
+        x_samp = rng.choice(np.arange(N // M), size=M) + np.arange(N, step=N // M)  # Sampling locations
+        sigma = 2 * 1e-2  # Noise variance
+        y = gt[x_samp] + sigma * rng.standard_normal(size=M)  # Noisy data points
+
+        # Data-fidelity term
+        subsamp_mat = sp.sparse.csr_array((M, N))
+        for i in range(M):
+            subsamp_mat[i, x_samp[i]] = 1
+        G = pyca.LinOp.from_array(subsamp_mat)
+        f = 1 / 2 * pycop.SquaredL2Norm(dim=y.size).argshift(-y) * G
+        f.diff_lipschitz()
+
+        # Regularization term (promotes sparse second derivatives)
+        deriv_mat = sp.sparse.diags(diagonals=[1, -2, 1], offsets=[0, 1, 2], shape=(N - 2, N))
+        D = pyca.LinOp.from_array(deriv_mat)
+        lamb = 1e-1  # Regularization parameter
+        h = lamb * pycn.L1Norm(dim=D.codim)
+
+        # Solver for ADMM
+        tau = 1 / lamb  # Internal ADMM parameter
+        # Inverse operator to solve the linear system
+        A_inv = sp.linalg.inv(G.gram().asarray() + (1 / tau) * D.gram().asarray())
+        def solver_ADMM(arr, tau):
+            b = (1 / tau) * D.adjoint(arr) + G.adjoint(y)
+            return A_inv @ b.squeeze()
+
+        # Solve optimization problem
+        admm = ADMM(f=f, h=h, K=D, solver=solver_ADMM)  # With solver
+        admm.fit(**dict(x0=np.zeros(N), tau=tau))
+        x_opt = admm.solution()  # Reconstructed signal
+
+        # Plots
+        plt.figure()
+        plt.plot(np.arange(N), gt, label='Ground truth')
+        plt.plot(x_samp, y, 'kx', label='Noisy data points')
+        plt.plot(np.arange(N), x_opt, label='Reconstructed signal')
+        plt.legend()
+        plt.show()
 
     See Also
     --------
-    :py:class:`~pycsou.opt.solver.pds.CondatVu`, :py:class:`~pycsou.opt.solver.pds.PD3O`,:py:class:`~pycsou.opt.solver.pgd.PGD`, :py:func:`~pycsou.opt.solver.pds.ChambollePock`, :py:func:`~pycsou.opt.solver.pds.DouglasRachford`"""
+    :py:class:`~pycsou.opt.solver.pds.CondatVu`, :py:class:`~pycsou.opt.solver.pds.PD3O`,
+    :py:class:`~pycsou.opt.solver.pgd.PGD`, :py:func:`~pycsou.opt.solver.pds.ChambollePock`,
+    :py:func:`~pycsou.opt.solver.pds.DouglasRachford`"""
 
     def __init__(
         self,
-        g: typ.Optional[pyca.ProxFunc] = None,
+        f: typ.Optional[pyca.Func] = None,
         h: typ.Optional[pyca.ProxFunc] = None,
+        K: typ.Optional[pyca.DiffMap] = None,
+        solver: typ.Callable[[pyct.NDArray, float], pyct.NDArray] = None,
+        solver_kwargs: typ.Optional[dict] = None,
         **kwargs,
     ):
         kwargs.update(log_var=kwargs.get("log_var", ("x", "u", "z")))
+
+        x_update_solver = "custom"  # Method for the x-minimization step
+        g = None
+        if solver is None:
+            if f is None:
+                if h is None:
+                    msg = " ".join(
+                        [
+                            "Cannot minimize always-0 functional.",
+                            "At least one of Parameter[f, h] must be specified.",
+                        ]
+                    )
+                    raise ValueError(msg)
+                if K is None:  # Prox scenario (classical ADMM)
+                    f = pycf.NullFunc(h.dim)
+                else:  # Sub-iterative CG scenario
+                    f = pyco.QuadraticFunc(
+                        shape=(1, h.dim), Q=pyclo.NullOp(shape=(h.dim, h.dim)), c=pycf.NullFunc(dim=h.dim)
+                    )
+            if f.has(pyco.Property.PROXIMABLE) and K is None:
+                x_update_solver = "prox"
+                g = f  # In this case, f corresponds to g in the _PDS terminology
+                f = None
+            elif isinstance(f, pyco.QuadraticFunc):
+                x_update_solver = "cg"
+                self._K_gram = K.gram()
+                warnings.warn(
+                    "A sub-iterative conjugate gradient algorithm is used for the x-minimization step "
+                    "of ADMM. This might be computationally expensive.",
+                    UserWarning,
+                )
+            elif f.has(pyco.Property.DIFFERENTIABLE_FUNCTION):
+                x_update_solver = "nlcg"
+                self._K_gram = K.gram()
+                warnings.warn(
+                    "A sub-iterative non-linear conjugate gradient algorithm is used for the "
+                    "x-minimization step of ADMM. This might be computationally expensive.",
+                    UserWarning,
+                )
+            else:
+                raise TypeError(
+                    "Unsupported scenario: f must either be a ProxFunc (in which case K must be None), a "
+                    "QuadraticFunc, or a DiffMap. If neither of these scenarios hold, a solver must be provided for "
+                    "the x-minimization step of ADMM."
+                )
+        self._solver = solver
+        self._x_update_solver = x_update_solver
+        self._init_kwargs = solver_kwargs if solver_kwargs is not None else dict(show_progress=False)
+
         super().__init__(
-            f=None,
+            f=f,
             g=g,
             h=h,
-            K=None,
-            beta=0,
+            K=K,
             **kwargs,
         )
 
@@ -1259,24 +1462,53 @@ class ADMM(_PDS):
         tau: typ.Optional[pyct.Real] = None,
         rho: typ.Optional[pyct.Real] = None,
         tuning_strategy: typ.Literal[1, 2, 3] = 1,
+        solver_kwargs: typ.Optional[dict] = None,
+        **kwargs,
     ):
         super().m_init(x0=x0, z0=z0, tau=tau, sigma=None, rho=rho, tuning_strategy=tuning_strategy)
-        self._mstate["u"] = x0 if x0.ndim > 1 else x0.reshape(1, -1)
+        mst = self._mstate  # shorthand
+        mst["u"] = self._K(x0)
+
+        # Fit kwargs of sub-iterative solver
+        if solver_kwargs is None:
+            solver_kwargs = dict()
+        self._fit_kwargs = solver_kwargs
 
     def m_step(
         self,
-    ):  # Algorithm (130) in [PSA].
-
+    ):  # Algorithm (145) in [PSA]. Paper -> code correspondence: L -> K, K -> -Id, c -> 0, y -> u, v -> z, g -> h
         mst = self._mstate
-        mst["x"] = self._g.prox(mst["u"] - mst["z"], tau=mst["tau"])
-        z_temp = mst["z"] + mst["x"] - mst["u"]
+        mst["x"] = self._x_update(mst["u"] - mst["z"], tau=mst["tau"])
+        z_temp = mst["z"] + self._K(mst["x"]) - mst["u"]
         if not self._h._name == "NullFunc":
-            mst["u"] = self._h.prox(mst["x"] + z_temp, tau=mst["tau"])
-        mst["z"] = z_temp + (mst["rho"] - 1) * (mst["x"] - mst["u"])
+            mst["u"] = self._h.prox(self._K(mst["x"]) + z_temp, tau=mst["tau"])
+        mst["z"] = z_temp + (mst["rho"] - 1) * (self._K(mst["x"]) - mst["u"])
 
-    def solution(self, which: typ.Literal["primal_g", "primal_h", "dual"] = "primal_g") -> pyct.NDArray:
+    def _x_update(self, arr: pyct.NDArray, tau: float) -> pyct.NDArray:
+        if self._x_update_solver == "custom":
+            return self._solver(arr, tau)
+        elif self._x_update_solver == "prox":
+            return self._g.prox(arr, tau=tau)
+        elif self._x_update_solver == "cg":
+            from pycsou.opt.solver import CG
+
+            b = (1 / tau) * self._K.adjoint(arr) - self._f._c.grad(arr)
+            A = self._f._Q + (1 / tau) * self._K_gram
+            slvr = CG(A=A, **self._init_kwargs)
+            slvr.fit(b=b, x0=self._mstate["x"].copy(), **self._fit_kwargs)  # Initialize CG with previous iterate
+            return slvr.solution()
+        elif self._x_update_solver == "nlcg":
+            from pycsou.opt.solver import NLCG
+
+            c = pyca.LinFunc.from_array(-self._K.adjoint(arr))
+            quad_func = pyco.QuadraticFunc(shape=(1, self._f.dim), Q=2 * self._K_gram, c=c)
+            slvr = NLCG(f=self._f + (1 / tau) * quad_func, **self._init_kwargs)
+            slvr.fit(x0=self._mstate["x"].copy(), **self._fit_kwargs)  # Initialize NLCG with previous iterate
+            return slvr.solution()
+
+    def solution(self, which: typ.Literal["primal", "primal_h", "dual"] = "primal") -> pyct.NDArray:
         data, _ = self.stats()
-        if which == "primal_g":
+        if which == "primal":
             assert "x" in data.keys(), "Primal variable x in dom(g) was not logged (declare it in log_var to log it)."
             return data.get("x")
         elif which == "primal_h":
@@ -1286,137 +1518,7 @@ class ADMM(_PDS):
             assert "z" in data.keys(), "Dual variable z was not logged (declare it in log_var to log it)."
             return data.get("z") / self._mstate["tau"]
         else:
-            raise ValueError(f"Parameter which must be one of ['primal_g', 'primal_h', 'dual'] got: {which}.")
-
-    def _set_step_sizes(
-        self, tau: typ.Optional[pyct.Real], sigma: typ.Optional[pyct.Real], gamma: pyct.Real
-    ) -> typ.Tuple[pyct.Real, pyct.Real, pyct.Real]:
-        if tau is not None:
-            assert tau > 0, f"Parameter tau must be positive, got {tau}."
-        else:
-            tau = 1.0
-        delta = 2.0
-        return pycrt.coerce(tau), pycrt.coerce(1 / tau), pycrt.coerce(delta)
-
-
-class QuadraticADMM(_PDS):
-    r"""
-    Specialized ADMM algorithm for problems involving a quadratic and non-smooth composite terms.
-
-    This algorithm can be used to solve problems of the form:
-
-    .. math::
-
-       \min_{\mathbf{x}\in\mathbb{R}^N} \quad \mathcal{F}(\mathbf{x})\;\;+\;\;\mathcal{H}(\mathbf{K}\mathbf{x}),
-
-    where:
-
-    * :math:`\mathcal{F}:\mathbb{R}^N\rightarrow \mathbb{R}_+` is a *quadratic functional* (see :py:class:`~pycsou.operator.func.quadratic.QuadraticFunc` for a definition),
-    * :math:`\mathcal{H}:\mathbb{R}^M\rightarrow \mathbb{R}\cup\{+\infty\}` is a *proper*, *lower semicontinuous* and *convex function* with *simple proximal operator*.
-    * :math:`\mathbf{K}:\mathbb{R}^N\rightarrow \mathbb{R}^M` is a *linear operator* with **operator norm**: :math:`\Vert{\mathbf{K}}\Vert_2`,
-    * The problem is *feasible* --i.e. there exists at least one solution.
-
-    **Remark 1:**
-
-    The algorithm is still valid if :math:`\mathcal{H}` is zero.
-
-    **Remark 2:**
-    This algorithm handles the non-smooth composite term by means of a change of variable and the infimal postcomposition
-    trick discussed in Section 5.4 [PSA]_.
-    This technique requires inverting the weighted average of the quadratic functional's Hessian and the Gramian of :math:`\mathbf{K}` at each iteration,
-    which can be expensive if the Hessian/Gramian cannot be evaluated with fast algorithms. In practice, the inversion is performed
-    via Pycsou's conjugate gradient method :py:class:`~pycsou.opt.solver.cg.CG`. Note that this algorithm **does not require** the
-    diff-lipschitz constant of :math:`\mathcal{F}` to be known!
-
-    **Initialization parameters of the class:**
-
-    f: QuadraticFunc | None
-        Quadratic functional, instance of :py:class:`~pycsou.operator.func.quadratic.QuadraticFunc`.
-    h: ProxFunc | None
-        Proximable functional, instance of :py:class:`~pycsou.abc.operator.ProxFunc`.
-    K: LinOp | None
-        Linear operator,  instance of :py:class:`~pycsou.abc.operator.LinOp`.
-
-    **Parameterization** of the ``fit()`` method:
-
-    x0: NDArray
-        (..., N) initial point(s) for the primal variable.
-    z0: NDArray
-        (..., N) initial point(s) for the dual variable.
-        If ``None`` (default), then use ``K(x0)`` as the initial point for the dual variable.
-    tau: Real | None
-        Primal step size.
-    rho: Real | None
-        Momentum parameter.
-    tuning_strategy: [1, 2, 3]
-        Strategy to be employed when setting the hyperparameters (default to 1). See base class for more details.
-
-
-    See Also
-    --------
-    :py:class:`~pycsou.opt.solver.pds.ADMM`, :py:class:`~pycsou.opt.solver.pds.CondatVu`, :py:class:`~pycsou.opt.solver.pds.PD3O`,
-    :py:class:`~pycsou.opt.solver.pgd.PGD`, :py:func:`~pycsou.opt.solver.pds.ChambollePock`, :py:func:`~pycsou.opt.solver.pds.DouglasRachford`
-    """
-
-    def __init__(
-        self,
-        f: typ.Optional[pycf.QuadraticFunc] = None,
-        h: typ.Optional[pyca.ProxFunc] = None,
-        K: typ.Optional[pyca.DiffMap] = None,
-        **kwargs,
-    ):
-        kwargs.update(log_var=kwargs.get("log_var", ("x", "u", "z")))
-        super().__init__(
-            f=f,
-            g=None,
-            h=h,
-            K=K,
-            beta=1,  # Beta is irrelevant here, set it to 1 arbitrarily to prevent _PDS from complaining.
-            **kwargs,
-        )
-
-    @pycrt.enforce_precision(i=["x0", "z0", "tau", "rho"], allow_None=True)
-    def m_init(
-        self,
-        x0: pyct.NDArray,
-        z0: typ.Optional[pyct.NDArray] = None,
-        tau: typ.Optional[pyct.Real] = None,
-        rho: typ.Optional[pyct.Real] = None,
-        tuning_strategy: typ.Literal[1, 2, 3] = 1,
-    ):
-        super().m_init(x0=x0, z0=z0, tau=tau, sigma=None, rho=rho, tuning_strategy=tuning_strategy)
-        self._mstate["u"] = self._K(x0) if x0.ndim > 1 else self._K(x0).reshape(1, -1)
-
-    def m_step(
-        self,
-    ):  # Algorithm (145) in [PSA]_.
-
-        mst = self._mstate
-        mst["x"] = self._quadratic_modified_prox(mst["u"] - mst["z"], tau=mst["tau"])
-        z_temp = mst["z"] + self._K(mst["x"]) - mst["u"]
-        if not self._h._name == "NullFunc":
-            mst["u"] = self._h.prox(self._K(mst["x"]) + z_temp, tau=mst["tau"])
-        mst["z"] = z_temp + (mst["rho"] - 1) * (self._K(mst["x"]) - mst["u"])
-
-    def _quadratic_modified_prox(self, arr: pyct.NDArray, tau: float) -> pyct.NDArray:
-        from pycsou.opt.solver import CG
-
-        A = self._f._Q + (1 / tau) * self._K.gram()
-        b = (1 / tau) * self._K.adjoint(arr) - self._f._c.grad(arr)
-        slvr = CG(A=A)
-        slvr.fit(b=b)
-        return slvr.solution()
-
-    def solution(self, which: typ.Literal["primal", "dual"] = "primal") -> pyct.NDArray:
-        data, _ = self.stats()
-        if which == "primal":
-            assert "x" in data.keys(), "Primal variable x was not logged (declare it in log_var to log it)."
-            return data.get("x")
-        elif which == "dual":
-            assert "z" in data.keys(), "Dual variable z was not logged (declare it in log_var to log it)."
-            return data.get("z") / self._mstate["tau"]
-        else:
-            raise ValueError(f"Parameter which must be one of ['primal', 'dual'] got: {which}.")
+            raise ValueError(f"Parameter which must be one of ['primal', 'primal_h', 'dual'] got: {which}.")
 
     def _set_step_sizes(
         self, tau: typ.Optional[pyct.Real], sigma: typ.Optional[pyct.Real], gamma: pyct.Real
@@ -1557,7 +1659,7 @@ def ProximalPoint(
     --------
     :py:class:`~pycsou.opt.solver.pds.CondatVu`, :py:class:`~pycsou.opt.solver.pds.PD3O`,:py:class:`~pycsou.opt.solver.pgd.PGD`, :py:func:`~pycsou.opt.solver.pds.ChambollePock`, :py:func:`~pycsou.opt.solver.pds.DouglasRachford`"""
     kwargs.update(log_var=kwargs.get("log_var", ("x",)))
-    obj = base.__init__(
+    obj = base(
         f=None,
         g=g,
         h=None,

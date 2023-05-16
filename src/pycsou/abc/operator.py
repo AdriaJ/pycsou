@@ -77,7 +77,7 @@ class Property(enum.Enum):
         )
         data[self.LINEAR_SQUARE].append("trace")
         data[self.LINEAR_NORMAL].append("eigvals")
-        data[self.QUADRATIC].append("_hessian")
+        data[self.QUADRATIC].append("_quad_spec")
 
         meth = frozenset(data[self])
         return meth
@@ -568,6 +568,7 @@ class Map(Operator):
         """
         return self.apply(arr)
 
+    @pycrt.enforce_precision()
     def lipschitz(self, **kwargs) -> pyct.Real:
         r"""
         Compute a Lipschitz constant of the operator.
@@ -622,6 +623,9 @@ class Func(Map):
     def asloss(self, data: pyct.NDArray = None) -> pyct.OpT:
         """
         Transform a functional into a loss functional.
+
+        The meaning of ``asloss()`` is operator-dependent: always examine ``op.expr()`` to determine
+        the loss-notion involved.
 
         Parameters
         ----------
@@ -703,6 +707,7 @@ class DiffMap(Map):
         """
         raise NotImplementedError
 
+    @pycrt.enforce_precision()
     def diff_lipschitz(self, **kwargs) -> pyct.Real:
         r"""
         Compute a Lipschitz constant of :py:meth:`~pycsou.abc.operator.DiffMap.jacobian`.
@@ -937,6 +942,9 @@ class ProxFunc(Func):
            plt.legend(labels)
            plt.title('Derivative of Moreau Envelope')
         """
+        from pycsou.operator.interop.source import from_source
+
+        assert mu > 0, f"mu: expected positive, got {mu}"
 
         @pycrt.enforce_precision(i="arr")
         def op_apply(_, arr):
@@ -954,16 +962,18 @@ class ProxFunc(Func):
             x /= _._mu
             return x
 
-        def op_expr(_) -> tuple:
-            return ("moreau_envelope", self, _._mu)
-
-        assert mu > 0, f"mu: expected positive, got {mu}"
-        op = DiffFunc(self.shape)
-        op._mu = mu
-        op._diff_lipschitz = 1 / mu
-        op.apply = types.MethodType(op_apply, op)
-        op.grad = types.MethodType(op_grad, op)
-        op._expr = types.MethodType(op_expr, op)
+        op = from_source(
+            cls=DiffFunc,
+            shape=self.shape,
+            embed=dict(
+                _name="moreau_envelope",
+                _mu=mu,
+            ),
+            _diff_lipschitz=1 / mu,
+            apply=op_apply,
+            grad=op_grad,
+            _expr=lambda _: ("moreau_envelope", _, _._mu),
+        )
         return op
 
 
@@ -1061,25 +1071,145 @@ class ProxDiffFunc(ProxFunc, DiffFunc):
         DiffFunc.__init__(self, shape)
 
 
-class _QuadraticFunc(ProxDiffFunc):
-    # Hidden alias of pycsou.operator.func.quadratic.QuadraticFunc to enable operator arithmetic.
+class QuadraticFunc(ProxDiffFunc):
+    # This is a special abstract base class with more __init__ parameters than `shape`.
+    r"""
+    Base class for quadratic functionals :math:`\mathbb{R}^{M} \to \mathbb{R}\cup\{+\infty\}`.
+
+    The quadratic functional is defined as:
+
+    .. math::
+
+        f(\mathbf{x})
+        =
+        \frac{1}{2} \langle\mathbf{x}, \mathbf{Q}\mathbf{x}\rangle
+        +
+        \mathbf{c}^T\mathbf{x}
+        +
+        t,
+        \qquad \forall \mathbf{x}\in\mathbb{R}^N,
+
+    where
+    :math:`Q` is a positive-definite operator :math:`\mathbf{Q}:\mathbb{R}^N\rightarrow\mathbb{R}^N`,
+    :math:`\mathbf{c}\in\mathbb{R}^N`, and
+    :math:`t>0`.
+
+    Its gradient is given by:
+
+    .. math::
+
+        \nabla f(\mathbf{x}) = \mathbf{Q}\mathbf{x} + \mathbf{c}
+
+    and proximity operator:
+
+    .. math::
+
+        \text{prox}_{\tau f}(x)
+        =
+        \left(
+            \mathbf{Q} + \tau^{-1} \mathbf{Id}
+        \right)^{-1}
+        \left(
+            \tau^{-1}\mathbf{x} - \mathbf{c}
+        \right).
+
+    In practice the proximity operator is evaluated via :py:class:`~pycsou.opt.solver.cg.CG`.
+
+    The Lipschitz constant of a quadratic on an unbounded domain is unbounded.
+    The Lipschitz constant of the gradient is given by the spectral norm of :math:`\mathbf{Q}`.
+    """
+
     @classmethod
     def properties(cls) -> cabc.Set[pyct.Property]:
         p = set(super().properties())
         p.add(Property.QUADRATIC)
         return frozenset(p)
 
-    def _hessian(self) -> pyct.OpT:
-        # (M, M) Hessian matrix which may be useful for some arithmetic methods.
-        # This function is NOT EXPOSED to the user on purpose: it is bad practice to try to compute
-        # the Hessian in large-scale inverse problems due to its size.
-        raise NotImplementedError
+    def __init__(
+        self,
+        shape: pyct.OpShape,
+        # required in place of `dim` to have uniform interface with Operator hierarchy.
+        Q: "PosDefOp" = None,
+        c: "LinFunc" = None,
+        t: pyct.Real = 0,
+    ):
+        r"""
+        Parameters
+        ----------
+        Q: pyca.PosDefOp
+            (N, N) positive-definite operator. (Default: Identity)
+        c: pyca.LinFunc
+            (1, N) linear functional. (Default: NullFunc)
+        t: pyct.Real
+            offset. (Default: 0)
+        """
+        from pycsou.operator.linop import IdentityOp, NullFunc
+
+        super().__init__(shape=shape)
+
+        # Do NOT access (_Q, _c, _t) directly through `self`:
+        # their values may not reflect the true (Q, c, t) parameterization.
+        # (Reason: arithmetic propagation.)
+        # Always access (Q, c, t) by querying the arithmetic method `_quad_spec()`.
+        self._Q = IdentityOp(dim=self.dim) if (Q is None) else Q
+        self._c = NullFunc(dim=self.dim) if (c is None) else c
+        self._t = t
+
+        # ensure dimensions are consistent if None-initialized
+        assert self._Q.shape == (self.dim, self.dim)
+        assert self._c.shape == self.shape
+
+        self._lipschitz = np.inf
+        self._diff_lipschitz = np.inf
+
+    @pycrt.enforce_precision(i="arr")
+    def apply(self, arr: pyct.NDArray) -> pyct.NDArray:
+        Q, c, t = self._quad_spec()
+        out = (arr * Q.apply(arr)).sum(axis=-1, keepdims=True)
+        out /= 2
+        out += c.apply(arr)
+        out += t
+        return out
+
+    @pycrt.enforce_precision(i="arr")
+    def grad(self, arr: pyct.NDArray) -> pyct.NDArray:
+        Q, c, _ = self._quad_spec()
+        out = pycu.copy_if_unsafe(Q.apply(arr))
+        out += c.grad(arr)
+        return out
+
+    @pycrt.enforce_precision(i=("arr", "tau"))
+    def prox(self, arr: pyct.NDArray, tau: pyct.Real) -> pyct.NDArray:
+        from pycsou.operator.linop import HomothetyOp
+        from pycsou.opt.solver import CG
+
+        Q, c, _ = self._quad_spec()
+        A = Q + HomothetyOp(cst=1 / tau, dim=Q.dim)
+        b = arr.copy()
+        b /= tau
+        b -= c.grad(arr)
+
+        slvr = CG(A=A, show_progress=False)
+        slvr.fit(b=b)
+        return slvr.solution()
 
     def asloss(self, data: pyct.NDArray = None) -> pyct.OpT:
         from pycsou.operator.func.loss import shift_loss
 
         op = shift_loss(op=self, data=data)
         return op
+
+    @pycrt.enforce_precision()
+    def diff_lipschitz(self, **kwargs) -> pyct.Real:
+        if (self._diff_lipschitz == np.inf) or kwargs.get("tight", False):
+            Q, *_ = self._quad_spec()
+            self._diff_lipschitz = Q.lipschitz(**kwargs)
+        return self._diff_lipschitz
+
+    def _quad_spec(self):
+        # canonical quadratic parameterization.
+        # useful for some internal methods, and overloaded during operator arithmetic.
+        return (self._Q, self._c, self._t)
 
 
 class LinOp(DiffMap):
@@ -1160,55 +1290,10 @@ class LinOp(DiffMap):
     def T(self) -> pyct.OpT:
         r"""
         Return the (M, N) adjoint of the linear operator.
-
-        See Also
-        --------
-        :py:meth:`~pycsou.abc.operator.LinOp.transpose`
         """
-        return self.transpose()
+        import pycsou.abc.arithmetic as arithmetic
 
-    def transpose(self, klass: pyct.OpC = None) -> pyct.OpT:
-        r"""
-        Return the (M, N) adjoint of the linear operator.
-
-        See Also
-        --------
-        :py:meth:`~pycsou.abc.operator.LinOp.T`
-        """
-        if klass is None:
-            klass = self._infer_operator_type(self.properties())
-
-        opT = klass(shape=(self.dim, self.codim))
-        opT._op = self  # embed for introspection
-        for p in opT.properties():
-            for name in p.arithmetic_attributes():
-                attr = getattr(self, name)
-                setattr(opT, name, attr)
-            for name in p.arithmetic_methods():
-                func = getattr(self.__class__, name)
-                setattr(opT, name, types.MethodType(func, opT))
-
-        def opT_asarray(_, **kwargs) -> pyct.NDArray:
-            A = self.asarray(**kwargs)
-            return A.T
-
-        def opT_eigvals(_, **kwargs) -> pyct.NDArray:
-            D = self.eigvals(**kwargs)
-            return D.conj()
-
-        def opT_expr(_) -> tuple:
-            return ("transpose", self)
-
-        # Overwrite arithmetic methods with different implementations vs. encapsulated op.
-        opT.apply = self.adjoint
-        opT.__call__ = opT.apply
-        opT.adjoint = self.apply
-        opT.asarray = types.MethodType(opT_asarray, opT)
-        opT.eigvals = types.MethodType(opT_eigvals, opT)
-        opT.gram = self.cogram
-        opT.cogram = self.gram
-        opT._expr = types.MethodType(opT_expr, opT)
-        return opT.squeeze()
+        return arithmetic.TransposeRule(op=self).op()
 
     def to_sciop(
         self,
@@ -1258,32 +1343,19 @@ class LinOp(DiffMap):
             dtype=dtype,
         )
 
-    def lipschitz(
-        self,
-        recompute: bool = False,
-        algo: str = "svds",
-        **kwargs,
-    ) -> pyct.Real:
+    @pycrt.enforce_precision()
+    def lipschitz(self, **kwargs) -> pyct.Real:
         r"""
         Return a (not necessarily optimal) Lipschitz constant of the operator.
 
         Parameters
         ----------
-        recompute: bool
-            If ``True``, forces re-estimation of the Lipschitz constant.
-            If ``False``, use the last-computed Lipschitz constant.
-        algo: 'svds', 'fro'
-            Algorithm used for computing the Lipschitz constant.
-
-            If ``algo==svds``, the Lipschitz constant is estimated as the spectral norm of :math:`L`
-            via :py:func:`scipy.sparse.linalg.svds`. (Accurate, but compute-intensive.)
-
-            If ``algo==fro``, the Lipschitz constant is estimated as the Froebenius norm of
-            :math:`L` via :py:func:`pycsou.math.linalg.hutchpp`. (Cheaper & less accurate than
-            SVD-based method.)
+        tight: bool
+            If ``True``, compute the optimal Lipschitz constant.
+            If ``False``, return any memoized finite-valued Lipschitz constant.
         kwargs:
-            Optional kwargs passed on to :py:func:`scipy.sparse.linalg.svds` or
-            :py:func:`pycsou.math.linalg.hutchpp`.
+            Optional kwargs passed on to :py:func:`scipy.sparse.linalg.svds` (``tight=True``) or
+            :py:func:`pycsou.math.linalg.hutchpp` (``tight=False``).
 
         Returns
         -------
@@ -1305,22 +1377,25 @@ class LinOp(DiffMap):
           equality is reached (worst-case scenario) when the eigenspectrum of the linear operator is
           flat.
         """
-        if recompute or (self._lipschitz == np.inf):
-            if algo == "fro":
-                from pycsou.math.linalg import hutchpp
+        if kwargs.pop("tight", False):
+            # Compute tightest value via svdvals()
+            kwargs.update(k=1, which="LM")
+            kwargs.pop("xp", None)  # `xp` unsupported by svdvals(), if provided.
+            self._lipschitz = self.svdvals(**kwargs).item()
+        elif self._lipschitz == np.inf:
+            # Upper bound via Frobenius norm
+            from pycsou.math.linalg import hutchpp
 
-                kwargs.update(m=kwargs.get("m", 126))
-                kwargs.pop("gpu", None)
-                op = self.gram() if (self.codim >= self.dim) else self.cogram()
-                self._lipschitz = np.sqrt(hutchpp(op, **kwargs)).item()
-            elif algo == "svds":
-                kwargs.update(k=1, which="LM")
-                kwargs.pop("xp", None)  # unsupported (if present) in svdvals()
-                self._lipschitz = self.svdvals(**kwargs).item()
-            else:
-                raise NotImplementedError
+            kwargs.update(m=kwargs.get("m", 126))
+            kwargs.pop("gpu", None)  # `gpu` unsupported by hutchpp(), if provided.
+            op = self.gram() if (self.codim >= self.dim) else self.cogram()
+            self._lipschitz = np.sqrt(hutchpp(op, **kwargs)).item()
+        else:
+            # Any finite-valued memoized quantity will do.
+            pass
         return self._lipschitz
 
+    @pycrt.enforce_precision()
     def svdvals(
         self,
         k: pyct.Integer,
@@ -1392,7 +1467,7 @@ class LinOp(DiffMap):
 
     def asarray(
         self,
-        xp: pyct.ArrayModule = np,
+        xp: pyct.ArrayModule = pycd.NDArrayInfo.NUMPY.module(),
         dtype: pyct.DType = None,
     ) -> pyct.NDArray:
         r"""
@@ -1575,13 +1650,15 @@ class LinOp(DiffMap):
         op: pyct.OpT
             (M, N) Moore-Penrose pseudo-inverse operator.
         """
+        from pycsou.operator.interop.source import from_source
+
         kwargs_fit = dict() if kwargs_fit is None else kwargs_fit
         kwargs_init = dict() if kwargs_init is None else kwargs_init
 
         def op_apply(_, arr: pyct.NDArray) -> pyct.NDArray:
             return self.pinv(
                 arr,
-                damp=damp,
+                damp=_._damp,
                 kwargs_init=copy.copy(kwargs_init),
                 kwargs_fit=copy.copy(kwargs_fit),
             )
@@ -1589,74 +1666,23 @@ class LinOp(DiffMap):
         def op_adjoint(_, arr: pyct.NDArray) -> pyct.NDArray:
             return self.T.pinv(
                 arr,
-                damp=damp,
+                damp=_._damp,
                 kwargs_init=copy.copy(kwargs_init),
                 kwargs_fit=copy.copy(kwargs_fit),
             )
 
-        def op_expr(_) -> tuple:
-            return ("dagger", self, damp)
-
-        klass = SquareOp if (self.dim == self.codim) else LinOp
-        dagger = klass(shape=(self.dim, self.codim))
-        dagger.apply = types.MethodType(op_apply, dagger)
-        dagger.__call__ = dagger.apply
-        dagger.adjoint = types.MethodType(op_adjoint, dagger)
-        dagger._expr = types.MethodType(op_expr, dagger)
+        dagger = from_source(
+            cls=SquareOp if (self.dim == self.codim) else LinOp,
+            shape=(self.dim, self.codim),
+            embed=dict(
+                _name="dagger",
+                _damp=damp,
+            ),
+            apply=op_apply,
+            adjoint=op_adjoint,
+            _expr=lambda _: (_._name, _, _._damp),
+        )
         return dagger
-
-    @classmethod
-    def from_sciop(cls, sp_op: spsl.LinearOperator) -> pyct.OpT:
-        r"""
-        Cast a :py:class:`scipy.sparse.linalg.LinearOperator` to a
-        :py:class:`~pycsou.abc.operator.LinOp`.
-
-        Parameters
-        ----------
-        sp_op: [scipy|cupyx].sparse.linalg.LinearOperator
-            (N, M) Linear operator compliant with SciPy's interface.
-
-        Returns
-        -------
-        op: pyct.OpT
-
-        Notes
-        -----
-        A :py:class:`~pycsou.abc.operator.LinOp` constructed via
-        :py:meth:`~pycsou.abc.operator.LinOp.from_sciop` does not respect precision hints from
-        pycsou's runtime environment. (Reason: this is just a thin layer around a SciOp to make it
-        interoperable with Pycsou operators.)
-
-        See Also
-        --------
-        :py:meth:`~pycsou.abc.operator.LinOp.from_array`,
-        :py:meth:`~pycsou.abc.operator.LinOp.to_sciop`.
-        """
-        if sp_op.dtype not in [_.value for _ in pycrt.Width]:
-            warnings.warn("Computation may not be performed at the requested precision.", pycuw.PrecisionWarning)
-
-        # [r]matmat only accepts 2D inputs -> reshape apply|adjoint inputs as needed.
-
-        def apply(_, arr):
-            if _1d := arr.ndim == 1:
-                arr = arr.reshape((1, arr.size))
-            out = sp_op.matmat(arr.T).T
-            if _1d:
-                out = out.squeeze(axis=0)
-            return out
-
-        def adjoint(_, arr):
-            if _1d := arr.ndim == 1:
-                arr = arr.reshape((1, arr.size))
-            out = sp_op.rmatmat(arr.T).T
-            if _1d:
-                out = out.squeeze(axis=0)
-            return out
-
-        op = cls(shape=sp_op.shape)
-        setattr(op, "apply", types.MethodType(apply, op))
-        setattr(op, "adjoint", types.MethodType(adjoint, op))
-        return op
 
     @classmethod
     def from_array(
@@ -1671,15 +1697,13 @@ class LinOp(DiffMap):
         ----------
         A: pyct.NDArray
             (N, M) array
+        enable_warnings: bool
+            If ``True``, emit a warning in case of precision mis-match issues.
 
         Returns
         -------
         op: pyct.OpT
             (N, M) linear operator
-
-        See Also
-        --------
-        :py:meth:`~pycsou.abc.operator.LinOp.from_sciop`,
         """
         from pycsou.operator.linop.base import _ExplicitLinOp
 
@@ -1702,6 +1726,7 @@ class SquareOp(LinOp):
         super().__init__(shape=shape)
         assert self.dim == self.codim, f"shape: expected (M, M), got {self.shape}."
 
+    @pycrt.enforce_precision()
     def trace(self, **kwargs) -> pyct.Real:
         """
         Approximate trace of a linear operator.
@@ -1834,9 +1859,6 @@ class SelfAdjointOp(NormalOp):
     def adjoint(self, arr: pyct.NDArray) -> pyct.NDArray:
         return self.apply(arr)
 
-    def transpose(self, **kwargs) -> pyct.OpT:
-        return self.squeeze()
-
     def eigvals(
         self,
         k: pyct.Integer,
@@ -1862,6 +1884,7 @@ class UnitOp(NormalOp):
         super().__init__(shape=shape)
         self._lipschitz = 1
 
+    @pycrt.enforce_precision()
     def lipschitz(self, **kwargs) -> pyct.Real:
         return self._lipschitz
 
@@ -1922,6 +1945,7 @@ class OrthProjOp(ProjOp, SelfAdjointOp):
         super().__init__(shape=shape)
         self._lipschitz = 1
 
+    @pycrt.enforce_precision()
     def lipschitz(self, **kwargs) -> pyct.Real:
         return self._lipschitz
 
@@ -1981,14 +2005,14 @@ class LinFunc(ProxDiffFunc, LinOp):
         super().__init__(shape=shape)
         ProxDiffFunc.__init__(self, shape)
         LinOp.__init__(self, shape)
-        assert self.dim != None, "shape: domain-agnostic LinFuncs are not supported."
+        assert self.dim is not None, "shape: domain-agnostic LinFuncs are not supported."
         # Reason: `op.adjoint(arr).shape` cannot be inferred based on `arr.shape` and `op.dim`.
 
     def jacobian(self, arr: pyct.NDArray) -> pyct.OpT:
         return LinOp.jacobian(self, arr)
 
+    @pycrt.enforce_precision()
     def lipschitz(self, **kwargs) -> pyct.Real:
-        # 'fro' / 'svds' mode are identical for linfuncs.
         xp = kwargs.get("xp", pycd.NDArrayInfo.NUMPY.module())
         g = self.grad(xp.ones(self.dim))
         self._lipschitz = float(xp.linalg.norm(g))
@@ -2013,27 +2037,27 @@ class LinFunc(ProxDiffFunc, LinOp):
     def fenchel_prox(self, arr: pyct.NDArray, sigma: pyct.Real) -> pyct.NDArray:
         return self.grad(arr)
 
-    def transpose(self, **kwargs) -> pyct.OpT:
-        if self.dim == self.codim:
-            opT = self
-        else:
-            opT = super().transpose(klass=LinOp)
-        return opT
-
     def cogram(self) -> pyct.OpT:
         from pycsou.operator.linop import HomothetyOp
 
-        return HomothetyOp(cst=self.lipschitz() ** 2, dim=1)
+        try:
+            # If operator is domain-specific, then this may not work.
+            L = self.lipschitz()
+        except Exception:
+            # So we sometimes must piggy-back on a potentially-slower solution.
+            L = np.linalg.norm(self.asarray().flatten())
+
+        return HomothetyOp(cst=L**2, dim=1)
 
     def svdvals(self, **kwargs) -> pyct.NDArray:
         N = pycd.NDArrayInfo
         xp = {True: N.CUPY, False: N.NUMPY}[kwargs.pop("gpu", False)].module()
-        D = xp.array([self.lipschitz()], dtype=pycrt.getPrecision().value)
+        D = xp.array([self.lipschitz(xp=xp)], dtype=pycrt.getPrecision().value)
         return D
 
     def asarray(
         self,
-        xp: pyct.ArrayModule = np,
+        xp: pyct.ArrayModule = pycd.NDArrayInfo.NUMPY.module(),
         dtype: pyct.DType = None,
     ) -> pyct.NDArray:
         if dtype is None:

@@ -1,8 +1,7 @@
-import types
-
 import numpy as np
 
 import pycsou.abc.operator as pyco
+import pycsou.operator.interop.source as pycsrc
 import pycsou.runtime as pycrt
 import pycsou.util as pycu
 import pycsou.util.deps as pycd
@@ -118,6 +117,16 @@ def kron(A: pyct.OpT, B: pyct.OpT) -> pyct.OpT:
         out = u.reshape((*sh_prefix, -1))  # (..., A.dim * B.dim)
         return out
 
+    @pycrt.enforce_precision()
+    def op_lipschitz(_, **kwargs) -> pyct.Real:
+        if kwargs.get("tight", False):
+            _._lipschitz = _.__class__.lipschitz(_, **kwargs)
+        else:
+            L_A = _._A.lipschitz(**kwargs)
+            L_B = _._B.lipschitz(**kwargs)
+            _._lipschitz = L_A * L_B
+        return _._lipschitz
+
     def op_asarray(_, **kwargs) -> pyct.NDArray:
         # (A \kron B).asarray() = A.asarray() \kron B.asarray()
         A = _._A.asarray(**kwargs)
@@ -199,6 +208,7 @@ def kron(A: pyct.OpT, B: pyct.OpT) -> pyct.OpT:
             out = _.__class__.pinv(_, arr, **kwargs)
         return out
 
+    @pycrt.enforce_precision()
     def op_trace(_, **kwargs) -> pyct.Real:
         # tr(A \kron B) = tr(A) * tr(B)
         # [if both square, else default algorithm]
@@ -210,30 +220,41 @@ def kron(A: pyct.OpT, B: pyct.OpT) -> pyct.OpT:
             tr = _._A.trace(**kwargs) * _._B.trace(**kwargs)
         else:
             tr = _.__class__.trace(_, **kwargs)
-        return float(tr)
-
-    def op_expr(_) -> tuple:
-        return ("kron", _._A, _._B)
+        return tr
 
     _A = A.squeeze()
     _B = B.squeeze()
-    if not (klass := _infer_op_klass(_A, _B)).has(pyco.Property.LINEAR):
-        raise ValueError("Kronecker product is defined for linear operators only.")
-    op = klass(shape=_infer_op_shape(_A.shape, _B.shape))
-    op._name = "kron"
-    op._A = _A  # embed for introspection
-    op._B = _B  # embed for introspection
+    assert (klass := _infer_op_klass(_A, _B)).has(pyco.Property.LINEAR)
+    is_scalar = lambda _: _.shape == (1, 1)
+    if is_scalar(_A) and is_scalar(_B):
+        from pycsou.operator.linop.base import HomothetyOp
 
-    op.apply = types.MethodType(op_apply, op)
-    op.adjoint = types.MethodType(op_adjoint, op)
-    op.asarray = types.MethodType(op_asarray, op)
-    op.gram = types.MethodType(op_gram, op)
-    op.cogram = types.MethodType(op_cogram, op)
-    op.svdvals = types.MethodType(op_svdvals, op)
-    op.eigvals = types.MethodType(op_eigvals, op)
-    op.pinv = types.MethodType(op_pinv, op)
-    op.trace = types.MethodType(op_trace, op)
-    op._expr = types.MethodType(op_expr, op)
+        return HomothetyOp(cst=(_A.asarray() * _B.asarray()).item(), dim=1)
+    elif is_scalar(_A) and (not is_scalar(_B)):
+        return _A.asarray().item() * _B
+    elif (not is_scalar(_A)) and is_scalar(B):
+        return _A * _B.asarray().item()
+    else:
+        op = pycsrc.from_source(
+            cls=klass,
+            shape=_infer_op_shape(_A.shape, _B.shape),
+            embed=dict(
+                _name="kron",
+                _A=_A,
+                _B=_B,
+            ),
+            apply=op_apply,
+            adjoint=op_adjoint,
+            asarray=op_asarray,
+            gram=op_gram,
+            cogram=op_cogram,
+            svdvals=op_svdvals,
+            eigvals=op_eigvals,
+            pinv=op_pinv,
+            trace=op_trace,
+            lipschitz=op_lipschitz,
+            _expr=lambda _: (_._name, _._A, _._B),
+        )
     return op
 
 
@@ -317,7 +338,7 @@ def khatri_rao(A: pyct.OpT, B: pyct.OpT) -> pyct.OpT:
         sh_prefix = arr.shape[:-1]
         sh_dim = len(sh_prefix)
         xp = pycu.get_array_module(arr)
-        I = xp.eye(N=_.dim, dtype=arr.dtype)  # (dim, dim)
+        I = xp.eye(N=_.dim, dtype=arr.dtype)  # noqa: E741
 
         x = arr.reshape((*sh_prefix, 1, _.dim))  # (..., 1, dim)
         y = _._B.apply(x * I)  # (..., dim, B.codim)
@@ -335,7 +356,7 @@ def khatri_rao(A: pyct.OpT, B: pyct.OpT) -> pyct.OpT:
         sh_prefix = arr.shape[:-1]
         sh_dim = len(sh_prefix)
         xp = pycu.get_array_module(arr)
-        I = xp.eye(N=_.dim, dtype=arr.dtype)
+        I = xp.eye(N=_.dim, dtype=arr.dtype)  # noqa: E741
 
         x = arr.reshape((*sh_prefix, _._A.codim, _._B.codim))  # (..., A.codim, B.codim)
         y = _._B.adjoint(x)  # (..., A.codim, B.dim)
@@ -353,20 +374,33 @@ def khatri_rao(A: pyct.OpT, B: pyct.OpT) -> pyct.OpT:
         C = (A * B).reshape((_.dim, -1)).T
         return C
 
-    def op_expr(_) -> tuple:
-        return ("khatri_rao", _._A, _._B)
+    @pycrt.enforce_precision()
+    def op_lipschitz(_, **kwargs) -> pyct.Real:
+        if kwargs.get("tight", False):
+            _._lipschitz = _.__class__.lipschitz(_, **kwargs)
+        else:
+            # kr(A,B) = kron(A,B) + sub-sampling
+            # -> upper-bound provided by kron(A,B).lipschitz()
+            op = kron(_._A, _._B)
+            _._lipschitz = op.lipschitz(**kwargs)
+        return _._lipschitz
 
     _A = A.squeeze()
     _B = B.squeeze()
-    if not (klass := _infer_op_klass(_A, _B)).has(pyco.Property.LINEAR):
-        raise ValueError("Khatri-Rao product is defined for linear operators only.")
-    op = klass(shape=_infer_op_shape(_A.shape, _B.shape))
-    op._name = "khatri_rao"
-    op._A = _A  # embed for introspection
-    op._B = _B  # embed for introspection
+    assert (klass := _infer_op_klass(_A, _B)).has(pyco.Property.LINEAR)
 
-    op.apply = types.MethodType(op_apply, op)
-    op.adjoint = types.MethodType(op_adjoint, op)
-    op.asarray = types.MethodType(op_asarray, op)
-    op._expr = types.MethodType(op_expr, op)
+    op = pycsrc.from_source(
+        cls=klass,
+        shape=_infer_op_shape(_A.shape, _B.shape),
+        embed=dict(
+            _name="khatri_rao",
+            _A=_A,
+            _B=_B,
+        ),
+        apply=op_apply,
+        adjoint=op_adjoint,
+        asarray=op_asarray,
+        lipschitz=op_lipschitz,
+        _expr=lambda _: (_._name, _._A, _._B),
+    )
     return op

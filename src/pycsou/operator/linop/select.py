@@ -1,17 +1,17 @@
 import collections.abc as cabc
-import types
 import typing as typ
 
 import numpy as np
 
 import pycsou.abc as pyca
+import pycsou.operator.interop.source as pycsrc
 import pycsou.runtime as pycrt
 import pycsou.util as pycu
-import pycsou.util.deps as pycd
 import pycsou.util.ptype as pyct
 
 __all__ = [
     "SubSample",
+    "Trim",
 ]
 
 
@@ -70,6 +70,12 @@ class SubSample(pyca.LinOp):
         cabc.Sequence[pyct.Integer],
         slice,
         pyct.NDArray,  # ints or boolean mask (per dimension)
+    ]
+
+    TrimSpec = typ.Union[
+        pyct.Integer,
+        cabc.Sequence[pyct.Integer],
+        cabc.Sequence[tuple[pyct.Integer, pyct.Integer]],
     ]
 
     def __init__(
@@ -159,6 +165,7 @@ class SubSample(pyca.LinOp):
         out = out.reshape(*sh, -1)
         return out
 
+    @pycrt.enforce_precision()
     def lipschitz(self, **kwargs) -> pyct.Real:
         self._lipschitz = 1
         return self._lipschitz
@@ -174,9 +181,12 @@ class SubSample(pyca.LinOp):
             out = _op.adjoint(_op.apply(arr))
             return out
 
-        op = pyca.OrthProjOp(shape=(self.dim, self.dim))
-        op._op = self
-        op.apply = types.MethodType(op_apply, op)
+        op = pycsrc.from_source(
+            cls=pyca.OrthProjOp,
+            shape=(self.dim, self.dim),
+            embed=dict(_op=self),
+            apply=op_apply,
+        )
         return op
 
     def cogram(self) -> pyct.OpT:
@@ -195,3 +205,52 @@ class SubSample(pyca.LinOp):
     def dagger(self, **kwargs) -> pyct.OpT:
         op = self.T / (1 + kwargs.get("damp", 0))
         return op
+
+
+def Trim(
+    arg_shape: pyct.NDArrayShape,
+    trim_width: SubSample.TrimSpec,
+) -> pyct.OpT:
+    """
+    Multi-dimensional trimming operator.
+
+    This operator trims the input array in each dimension according to specified widths.
+
+    Parameters
+    ----------
+    arg_shape: pyct.NDArrayShape
+        Shape of the input array.
+    trim_width: TrimSpec
+        Number of values trimmed from the edges of each axis.
+        Multiple forms are accepted:
+
+        * int: trim each dimension's head/tail by `trim_width`.
+        * tuple[int, ...]: trim dimension[k]'s head/tail by `trim_width[k]`.
+        * tuple[tuple[int, int], ...]: trim dimension[k]'s head/tail by `trim_width[k][0]` /
+          `trim_width[k][1]` respectively.
+
+    Returns
+    -------
+    op: pyct.OpT
+    """
+    arg_shape = tuple(arg_shape)
+    N_dim = len(arg_shape)
+
+    # transform `trim_width` to canonical form tuple[tuple[int, int]]
+    is_seq = lambda _: isinstance(_, cabc.Sequence)
+    if not is_seq(trim_width):  # int-form
+        trim_width = ((trim_width, trim_width),) * N_dim
+    assert len(trim_width) == N_dim, "arg_shape/trim_width are length-mismatched."
+    if not is_seq(trim_width[0]):  # tuple[int, ...] form
+        trim_width = tuple((w, w) for w in trim_width)
+    else:  # tuple[tuple[int, int], ...] form
+        pass
+
+    # translate `trim_width` to `indices` needed for SubSample
+    indices = []
+    for (w_head, w_tail), dim_size in zip(trim_width, arg_shape):
+        s = slice(w_head, dim_size - w_tail)
+        indices.append(s)
+
+    op = SubSample(arg_shape, *indices)
+    return op

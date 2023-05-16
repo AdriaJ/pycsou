@@ -40,7 +40,7 @@ OpT = typ.TypeVar(
     "pyco.NormalOp",
     "pyco.ProxFunc",
     "pyco.SquareOp",
-    "pyco._QuadraticFunc",
+    "pyco.QuadraticFunc",
     "pyco.ProjOp",
     "pyco.LinFunc",
     "pyco.PosDefOp",
@@ -65,6 +65,7 @@ Integer = int  # [Sepand] `nb.Integral` seems to not work will with PyCharm...
 Real = nb.Real
 DType = npt.DTypeLike
 OpShape = tuple[Integer, typ.Union[Integer, None]]
+NDArrayAxis = typ.Union[Integer, tuple[Integer, ...]]
 NDArrayShape = typ.Union[Integer, tuple[Integer, ...]]
 Path = typ.Union[str, plib.Path]
 VarName = typ.Union[str, cabc.Collection[str]]

@@ -13,15 +13,18 @@ __all__ = [
 
 class NLCG(pyca.Solver):
     r"""
-    Nonlinear Conjugate Gradient Method.
+    Nonlinear Conjugate Gradient Method (NLCG).
 
-    The Nonlinear Conjugate Gradient method finds local minima of the problem
+    The Nonlinear Conjugate Gradient method finds a local minimum of the problem
 
     .. math::
 
        \min_{x\in\mathbb{R}^{N}} f(x),
 
     where :math:`f: \mathbb{R}^{N} \to \mathbb{R}` is a *differentiable* functional.
+    When :math:`f` is quadratic, NLCG is equivalent to the Conjugate Gradient (CG) method.
+    NLCG hence has similar convergence behaviour to CG if :math:`f` is locally-quadratic.
+    The converge speed may be slower however due to its line-search overhead [NumOpt_NocWri]_.
 
     The norm of the `gradient <https://www.wikiwand.com/en/Nonlinear_conjugate_gradient_method>`_
     :math:`\nabla f_k = \nabla f(x_k)` is used as the default stopping criterion.
@@ -63,18 +66,50 @@ class NLCG(pyca.Solver):
     x0: pyct.NDArray
         (..., N) initial point(s).
     variant: str
-        Name of the NLCG variant to use.
-        Use "PR" for the Polak-Ribière+ variant.
-        Use "FR" for the Fletcher-Reeves variant.
+        Name of the NLCG variant to use:
+
+        * "PR" for the Polak-Ribière+ variant (default).
+        * "FR" for the Fletcher-Reeves variant.
     restart_rate: pyct.Integer
         Number of iterations after which restart is applied.
-        By default, restart is done after 'n' iterations, where 'n' corresponds to the dimension of
-        the inputs to :math:`f`.
+
+        By default, restart is done after :math:`N` iterations.
     **kwargs
         Optional parameters forwarded to :py:func:`~pycsou.math.linesearch.backtracking_linesearch`.
         (See: :py:mod:`~pycsou.math.linesearch`.)
 
+        If `a0` is unspecified and :math:`\nabla f` is :math:`\beta`-Lipschitz continuous, then `a0`
+        is auto-chosen as :math:`\beta^{-1}`.
         Users are expected to set `a0` if its value cannot be auto-inferred.
+
+    Example
+    --------
+    Consider the following quadratic optimization problem:
+
+    .. math:
+
+       \min_{\mathbf{x}} \Vert{A\mathbf{x}-\mathbf{b}}\Vert_2^2
+
+
+    This problem is strictly convex, hence NLCG will converge to the optimal solution:
+
+    .. code-block:: python3
+
+       import numpy as np
+
+       import pycsou.operator as pyco
+       import pycsou.opt.solver as pycs
+
+       N, a, b = 5, 3, 1
+       f = pyco.SquaredL2Norm(N).asloss(b).argscale(a)  # \norm(Ax - b)**2
+
+       nlcg = pycs.NLCG(f)
+       nlcg.fit(x0=np.zeros((N,)), variant="FR")
+       x_opt = nlcg.solution()
+       np.allclose(x_opt, 1/a)  # True
+
+    Note however that the CG method is preferable in this context since it omits the linesearch
+    overhead. The former depends on the cost of applying :math:`A`, and may be significant.
     """
 
     def __init__(self, f: pyca.DiffFunc, **kwargs):

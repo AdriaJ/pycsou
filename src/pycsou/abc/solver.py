@@ -116,7 +116,7 @@ class Solver:
 
     .. math::
 
-        \hat{x} = \arg\min_{x \in \mathbb{R}^{N}} \mathcal{F}(x),
+       \hat{x} = \arg\min_{x \in \mathbb{R}^{N}} \mathcal{F}(x),
 
     where the form of :math:`\mathcal{F}` is solver-dependent.
 
@@ -246,13 +246,13 @@ class Solver:
                 shutil.rmtree(folder, ignore_errors=True)
                 folder.mkdir(parents=True)
             self._astate["workdir"] = folder
-        except:
+        except Exception:
             raise Exception(f"folder: expected path-like, got {type(folder)}.")
 
         try:
             assert stop_rate >= 1
             self._astate["stop_rate"] = int(stop_rate)
-        except:
+        except Exception:
             raise ValueError(f"stop_rate must be positive, got {stop_rate}.")
 
         try:
@@ -260,7 +260,7 @@ class Solver:
             if writeback_rate is not None:
                 assert writeback_rate % self._astate["stop_rate"] == 0
                 self._astate["wb_rate"] = int(writeback_rate)
-        except:
+        except Exception:
             raise ValueError(f"writeback_rate must be a multiple of stop_rate({stop_rate}), got {writeback_rate}.")
 
         try:
@@ -269,14 +269,14 @@ class Solver:
             assert verbosity % self._astate["stop_rate"] == 0
             self._astate["log_rate"] = int(verbosity)
             self._astate["stdout"] = bool(show_progress)
-        except:
+        except Exception:
             raise ValueError(f"verbosity must be a multiple of stop_rate({stop_rate}), got {verbosity}.")
 
         try:
             if isinstance(log_var, str):
                 log_var = (log_var,)
             self._astate["log_var"] = frozenset(log_var)
-        except:
+        except Exception:
             raise ValueError(f"log_var: expected collection, got {type(log_var)}.")
 
     def fit(self, **kwargs):
@@ -650,8 +650,8 @@ class Solver:
         # Close file-handlers
         log_name = str(self.workdir)
         logger = logging.getLogger(log_name)
-        for l in logger.handlers:
-            l.close()
+        for handler in logger.handlers:
+            handler.close()
 
     def default_stop_crit(self) -> StoppingCriterion:
         """

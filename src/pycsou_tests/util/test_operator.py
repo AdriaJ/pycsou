@@ -77,9 +77,18 @@ class TestVectorize:
     def func(self, request):
         return request.param
 
-    @pytest.fixture
-    def vfunc(self, func):
-        return pycu.vectorize("x")(func)
+    @pytest.fixture(
+        params=[  # (method, codim)  [codim-size when specified comes from `data_func` fixture.]
+            ("scan", None),
+            ("scan", 10),  # codim irrelevant; bogus value to see if unused
+            ("parallel", 5),
+            ("scan_dask", 5),
+        ]
+    )
+    def vfunc(self, func, request):
+        method, codim = request.param
+        decorate = pycu.vectorize(i="x", method=method, codim=codim)
+        return decorate(func)
 
     @pytest.fixture
     def data_func(self, func):
@@ -117,7 +126,6 @@ class TestVectorize:
     def test_precision(self, func, vfunc, data_func):
         # decorated function should have same output dtype as base function.
         in_ = data_func["in_"]
-        out_gt = data_func["out"]
 
         out_f = func(**in_)
         out_vf = vfunc(**in_)
@@ -130,4 +138,4 @@ class TestVectorize:
         in_["x"] = xp.array(in_["x"])
         out = vfunc(**in_)
 
-        assert type(out) == type(in_["x"])
+        assert type(out) == type(in_["x"])  # noqa: E721

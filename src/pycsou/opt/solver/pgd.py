@@ -1,4 +1,5 @@
 import itertools
+import math
 import warnings
 
 import pycsou.abc as pyca
@@ -125,9 +126,8 @@ class PGD(pyca.Solver):
             self._g = pycof.NullFunc(dim=x0.shape[-1])
 
         if tau is None:
-            try:
-                mst["tau"] = pycrt.coerce(1 / self._f.diff_lipschitz())
-            except ZeroDivisionError as exc:
+            mst["tau"] = pycrt.coerce(1 / self._f.diff_lipschitz())
+            if math.isinf(mst["tau"]):
                 # _f is constant-valued: \tau is a free parameter.
                 mst["tau"] = 1
                 msg = "\n".join(
@@ -141,14 +141,14 @@ class PGD(pyca.Solver):
             try:
                 assert tau > 0
                 mst["tau"] = tau
-            except:
+            except Exception:
                 raise ValueError(f"tau must be positive, got {tau}.")
 
         if acceleration:
             try:
                 assert d > 2
                 mst["a"] = (pycrt.coerce(k / (k + 1 + d)) for k in itertools.count(start=0))
-            except:
+            except Exception:
                 raise ValueError(f"Expected d > 2, got {d}.")
         else:
             mst["a"] = itertools.repeat(pycrt.coerce(0))

@@ -145,13 +145,10 @@ class TestL2Norm(conftest.ProxFuncT):
         return self._random_array((N_test, dim))
 
 
-class TestSquaredL2Norm(conftest._QuadraticFuncT):
+class TestSquaredL2Norm(conftest.QuadraticFuncT):
     @pytest.fixture(
         params=itertools.product(
-            (  # dim, op
-                (7, pycof.SquaredL2Norm(dim=7)),
-                (None, pycof.SquaredL2Norm(dim=None)),
-            ),
+            ((7, pycof.SquaredL2Norm(dim=7)),),  # dim, op
             pycd.NDArrayInfo,
             pycrt.Width,
         )
@@ -221,3 +218,287 @@ class TestSquaredL2Norm(conftest._QuadraticFuncT):
     )
     def data_prox(self, request):
         return request.param
+
+
+# We disable PerformanceWarnings due to prox_algo="sort" used on Dask inputs.
+@pytest.mark.filterwarnings("ignore::pycsou.util.warning.PerformanceWarning")
+class TestSquaredL1Norm(conftest.ProxFuncT):
+    @pytest.fixture(
+        params=itertools.product(
+            (  # dim, op
+                (5, pycof.SquaredL1Norm(dim=5, prox_algo="sort")),
+                (5, pycof.SquaredL1Norm(dim=5, prox_algo="root")),
+                (None, pycof.SquaredL1Norm(dim=None, prox_algo="sort")),
+                (None, pycof.SquaredL1Norm(dim=None, prox_algo="root")),
+            ),
+            pycd.NDArrayInfo,
+            pycrt.Width,
+        )
+    )
+    def _spec(self, request):
+        return request.param
+
+    @pytest.fixture
+    def spec(self, _spec):
+        return _spec[0][1], _spec[1], _spec[2]
+
+    @pytest.fixture
+    def dim(self, _spec):
+        return _spec[0][0]
+
+    @pytest.fixture
+    def data_shape(self, dim):
+        return (1, dim)
+
+    @pytest.fixture(
+        params=[  # 2 evaluation points
+            dict(
+                in_=dict(arr=np.zeros((5,))),
+                out=np.zeros((1,)),
+            ),
+            dict(
+                in_=dict(arr=np.arange(-3, 2)),
+                out=np.array([49]),
+            ),
+        ]
+    )
+    def data_apply(self, request):
+        return request.param
+
+    @pytest.fixture(
+        params=[  # 2 evaluation points
+            dict(
+                in_=dict(
+                    arr=np.zeros((5,)),
+                    tau=1,
+                ),
+                out=np.zeros((5,)),
+            ),
+            dict(
+                in_=dict(
+                    arr=np.arange(-3, 2),
+                    tau=1,
+                ),
+                out=np.array([-1, 0, 0, 0, 0]),
+            ),
+        ]
+    )
+    def data_prox(self, request):
+        return request.param
+
+    @pytest.fixture
+    def data_math_lipschitz(self, dim):
+        N_test, dim = 10, self._sanitize(dim, 3)
+        return self._random_array((N_test, dim))
+
+
+class TestLInfinityNorm(conftest.ProxFuncT):
+    @pytest.fixture(
+        params=itertools.product(
+            (  # dim, op
+                (5, pycof.LInfinityNorm(dim=5)),
+                (None, pycof.LInfinityNorm(dim=None)),
+            ),
+            pycd.NDArrayInfo,
+            pycrt.Width,
+        )
+    )
+    def _spec(self, request):
+        return request.param
+
+    @pytest.fixture
+    def spec(self, _spec):
+        return _spec[0][1], _spec[1], _spec[2]
+
+    @pytest.fixture
+    def dim(self, _spec):
+        return _spec[0][0]
+
+    @pytest.fixture
+    def data_shape(self, dim):
+        return (1, dim)
+
+    @pytest.fixture(
+        params=[  # 2 evaluation points
+            dict(
+                in_=dict(arr=np.zeros((5,))),
+                out=np.zeros((1,)),
+            ),
+            dict(
+                in_=dict(arr=np.arange(-3, 2)),
+                out=np.array([3]),
+            ),
+        ]
+    )
+    def data_apply(self, request):
+        return request.param
+
+    @pytest.fixture(
+        params=[  # 2 evaluation points
+            dict(
+                in_=dict(
+                    arr=np.zeros((5,)),
+                    tau=1,
+                ),
+                out=np.zeros((5,)),
+            ),
+            dict(
+                in_=dict(
+                    arr=np.arange(-3, 2),
+                    tau=1,
+                ),
+                out=np.array([-2, -2, -1, 0, 1]),
+            ),
+        ]
+    )
+    def data_prox(self, request):
+        return request.param
+
+    @pytest.fixture
+    def data_math_lipschitz(self, dim):
+        N_test, dim = 10, self._sanitize(dim, 3)
+        return self._random_array((N_test, dim))
+
+
+class TestL21Norm(conftest.ProxFuncT):
+    @pytest.fixture(
+        params=itertools.product(
+            ((6, pycof.L21Norm(arg_shape=(2, 3))),),  # dim, op
+            pycd.NDArrayInfo,
+            pycrt.Width,
+        )
+    )
+    def _spec(self, request):
+        return request.param
+
+    @pytest.fixture
+    def spec(self, _spec):
+        return _spec[0][1], _spec[1], _spec[2]
+
+    @pytest.fixture
+    def dim(self, _spec):
+        return _spec[0][0]
+
+    @pytest.fixture
+    def data_shape(self, dim):
+        return (1, dim)
+
+    @pytest.fixture(
+        params=[  # 2 evaluation points
+            dict(
+                in_=dict(arr=np.zeros((6,))),
+                out=np.zeros((1,)),
+            ),
+            dict(
+                in_=dict(arr=np.array([1, 2, -3, 0, -2, -4])),
+                out=np.array([6 + 2 * np.sqrt(2)]),
+            ),
+        ]
+    )
+    def data_apply(self, request):
+        return request.param
+
+    @pytest.fixture(
+        params=[  # 2 evaluation points
+            dict(
+                in_=dict(
+                    arr=np.zeros((6,)),
+                    tau=1,
+                ),
+                out=np.zeros((6,)),
+            ),
+            dict(
+                in_=dict(
+                    arr=np.array([1, 2, -3, 0, -2, -4]),
+                    tau=4,
+                ),
+                out=np.array([0, 0, -3 / 5, 0, 0, -4 / 5]),
+            ),
+        ]
+    )
+    def data_prox(self, request):
+        return request.param
+
+    @pytest.fixture
+    def data_math_lipschitz(self, dim):
+        N_test = 10
+        return self._random_array((N_test, dim))
+
+
+class TestPositiveL1Norm(conftest.ProxFuncT):
+    @pytest.fixture(
+        params=itertools.product(
+            (  # dim, op
+                (5, pycof.PositiveL1Norm(dim=5)),
+                (None, pycof.PositiveL1Norm(dim=None)),
+            ),
+            pycd.NDArrayInfo,
+            pycrt.Width,
+        )
+    )
+    def _spec(self, request):
+        return request.param
+
+    @pytest.fixture
+    def spec(self, _spec):
+        return _spec[0][1], _spec[1], _spec[2]
+
+    @pytest.fixture
+    def dim(self, _spec):
+        return _spec[0][0]
+
+    @pytest.fixture
+    def data_shape(self, dim):
+        return (1, dim)
+
+    @pytest.fixture(
+        params=[  # 3 evaluation points
+            dict(
+                in_=dict(arr=np.zeros((5,))),
+                out=np.zeros((1,)),
+            ),
+            dict(
+                in_=dict(arr=np.arange(-3, 2)),
+                out=np.array([np.inf]),
+            ),
+            dict(
+                in_=dict(arr=np.arange(5)),
+                out=np.array([10]),
+            ),
+        ]
+    )
+    def data_apply(self, request):
+        return request.param
+
+    @pytest.fixture(
+        params=[  # 3 evaluation points
+            dict(
+                in_=dict(
+                    arr=np.zeros((5,)),
+                    tau=1,
+                ),
+                out=np.zeros((5,)),
+            ),
+            dict(
+                in_=dict(
+                    arr=np.arange(-3, 2),
+                    tau=1,
+                ),
+                out=np.array([0, 0, 0, 0, 0]),
+            ),
+            dict(
+                in_=dict(
+                    arr=np.arange(5),
+                    tau=1,
+                ),
+                out=np.array([0, 0, 1, 2, 3]),
+            ),
+        ]
+    )
+    def data_prox(self, request):
+        return request.param
+
+    @pytest.fixture
+    def data_math_lipschitz(self, dim):
+        N_test, dim = 10, self._sanitize(dim, 3)
+        return self._random_array((N_test, dim))

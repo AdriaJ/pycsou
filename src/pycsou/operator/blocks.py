@@ -1,6 +1,5 @@
 import collections
 import collections.abc as cabc
-import copy
 import functools
 import itertools
 import types
@@ -297,6 +296,7 @@ def block_diag(
         out = xp.concatenate(parts, axis=-1)
         return out
 
+    @pycrt.enforce_precision()
     def op_trace(_, **kwargs) -> pyct.Real:
         # op.trace(**kwargs) = if [op1,...,opN] square
         #                          sum([op1.trace(**kwargs), ..., opN.trace(**kwargs)])
@@ -310,7 +310,7 @@ def block_diag(
             tr = sum(parts)
         else:  # default fallback
             tr = pyco.SquareOp.trace(_, **kwargs)
-        return float(tr)
+        return tr
 
     def op_expr(_) -> tuple:
         ops = [_._block[k] for k in sorted(_._block.keys())]
@@ -459,6 +459,15 @@ def coo_block(
     * Each row/column of the coarse grid **must** contain at least one entry.
     * ``parallel=True`` only parallelizes execution when inputs to listed methods are NUMPY arrays.
 
+    .. Warning::
+
+       When processing Dask inputs, or when ``parallel=True``, operators which are not thread-safe
+       may produce incorrect results.
+       There is no easy way to ensure thread-safety at the level of
+       :py:mod:`~pycsou.operator.blocks` without impacting performance of all operators involved.
+       Users are thus responsible for executing block-defined operators correctly, i.e., if
+       thread-unsafe operators are involved, stick to NumPy/CuPy inputs.
+
     Examples
     --------
 
@@ -487,7 +496,13 @@ def coo_block(
     return op
 
 
-def _wrap_if_dask(func: cabc.Callable) -> cabc.Callable:
+def _parallelize(func: cabc.Callable) -> cabc.Callable:
+    # Parallelize execution of func() under conditions.
+    #
+    # * func() must be one of the arithmetic methods [apply,prox,grad,adjoint,pinv]()
+    # * the `_parallel` attribute must be attached to the instance for it to parallelize execution
+    #   over NUMPY inputs.
+
     @functools.wraps(func)
     def wrapper(*ARGS, **KWARGS):
         func_args = pycu.parse_params(func, *ARGS, **KWARGS)
@@ -536,10 +551,6 @@ class _COOBlock:  # See coo_block() for a detailed description.
         self._init_spec(ops)
         self._parallel = bool(parallel)
 
-        # Default Arithmetic Attributes
-        self._lipschitz = np.inf
-        self._diff_lipschitz = np.inf
-
     def op(self) -> pyct.OpT:
         """
         Returns
@@ -558,9 +569,9 @@ class _COOBlock:  # See coo_block() for a detailed description.
             op._grid_shape = self._grid_shape  # embed for introspection
             op._parallel = self._parallel  # embed for introspection
             for p in op.properties():
-                for name in p.arithmetic_attributes():
-                    attr = getattr(self, name)
-                    setattr(op, name, attr)
+                # We do NOT override arithmetic attributes since `op` contains good values to start
+                # with.
+
                 for name in p.arithmetic_methods():
                     func = getattr(self.__class__, name)
                     setattr(op, name, types.MethodType(func, op))
@@ -585,7 +596,7 @@ class _COOBlock:  # See coo_block() for a detailed description.
         assert 0 <= min(i) <= max(i) < N_row, msg
         assert 0 <= min(j) <= max(j) < N_col, msg
 
-        if any(op.dim == None for op in data):
+        if any(op.dim is None for op in data):
             raise ValueError("Domain-agnostic operators are unsupported.")
 
         # block dimensions are compatible.
@@ -674,7 +685,7 @@ class _COOBlock:  # See coo_block() for a detailed description.
         op = klass(shape=(op_codim, op_dim))
         return op
 
-    @_wrap_if_dask
+    @_parallelize
     @pycrt.enforce_precision(i="arr")
     def apply(self, arr: pyct.NDArray) -> pyct.NDArray:
         # compute blocks
@@ -698,31 +709,29 @@ class _COOBlock:  # See coo_block() for a detailed description.
     def __call__(self, arr: pyct.NDArray) -> pyct.NDArray:
         return self.apply(arr)
 
+    @pycrt.enforce_precision()
     def lipschitz(self, **kwargs) -> pyct.Real:
-        if self.has(pyco.Property.LINEAR):
-            if self.has(pyco.Property.FUNCTIONAL):
-                L = pyco.LinFunc.lipschitz(self, **kwargs)
-            else:
-                kwargs = copy.copy(kwargs)
-                kwargs.update(recompute=True)
-                L = pyco.LinOp.lipschitz(self, **kwargs)
+        if self.has(pyco.Property.LINEAR) and kwargs.get("tight", False):
+            klass = self.__class__
+            L = klass.lipschitz(self, **kwargs)
         else:
             # Various upper bounds apply depending on how the blocks are organized:
             #   * vertical alignment: L**2 = sum(L_k**2)
-            #   * horizontal alignment: L**2 = max(L_k**2)
+            #   * horizontal alignment: L**2 = sum(L_k**2)
             #   * block-diagonal alignment: L**2 = max(L_k**2)
-            #   * arbitrary 2D alignment: vertical+horizontal composition (or vice-versa)
-            # We compute all bounds and take the lowest one.
+            #   * arbitrary 2D alignment: L**2 = sum(L_k**2)
+            #     [obtained via vertical+horizontal composition (or vice-versa)]
 
             # squared Lipschitz constant of each block.
             Ls_all = np.zeros(self._grid_shape)
             for (r, c), op in self._block.items():
                 Ls_all[r, c] = op.lipschitz(**kwargs) ** 2
 
-            Ls_1 = Ls_all.sum(axis=0).max()  # upper bound 1
-            Ls_2 = Ls_all.max(axis=1).sum()  # upper bound 2
-            L = np.sqrt(min(Ls_1, Ls_2))
-        self._lipschitz = float(L)
+            if np.allclose(Ls_all.sum(), Ls_all.diagonal().sum()):  # block-diag case
+                L = np.sqrt(Ls_all.max())
+            else:
+                L = np.sqrt(Ls_all.sum())
+        self._lipschitz = L
         return self._lipschitz
 
     def _expr(self) -> tuple:
@@ -734,7 +743,7 @@ class _COOBlock:  # See coo_block() for a detailed description.
                 self._op = op
 
             def _expr(self) -> tuple:
-                head = f"block[" + ", ".join(map(str, self._idx)) + "]"
+                head = "block[" + ", ".join(map(str, self._idx)) + "]"
                 return (head, self._op)
 
         # head = coo_block[grid_shape]
@@ -744,7 +753,7 @@ class _COOBlock:  # See coo_block() for a detailed description.
         tail = [_Block(idx=k, op=op) for (k, op) in self._block.items()]
         return (head, *tail)
 
-    @_wrap_if_dask
+    @_parallelize
     @pycrt.enforce_precision(i=("arr", "tau"))
     def prox(self, arr: pyct.NDArray, tau: pyct.Real) -> pyct.NDArray:
         if not self.has(pyco.Property.PROXIMABLE):
@@ -761,23 +770,25 @@ class _COOBlock:  # See coo_block() for a detailed description.
         out = xp.concatenate(parts, axis=-1)
         return out
 
-    def _hessian(self) -> pyct.OpT:
+    def _quad_spec(self):
         if not self.has(pyco.Property.QUADRATIC):
             raise NotImplementedError
 
         parts = dict()
         for idx, op in self._block.items():
             if op.has(pyco.Property.QUADRATIC):
-                p = op._hessian()
+                _Q, _c, _t = op._quad_spec()
             else:  # op is necessarily LINEAR
                 from pycsou.operator.linop import NullOp
 
-                p = NullOp(shape=(op.dim, op.dim)).asop(pyco.PosDefOp)
-            parts[idx] = p
+                _Q = NullOp(shape=(op.dim, op.dim)).asop(pyco.PosDefOp)
+                _c = op
+                _t = 0
+            parts[idx] = _Q, _c, _t
 
         parts = [parts[k] for k in sorted(parts.keys())]  # re-ordering
-        H = block_diag(parts)
-        return H
+        Q, c, t = zip(*parts)
+        return (block_diag(Q), hstack(c), sum(t))
 
     def jacobian(self, arr: pyct.NDArray) -> pyct.OpT:
         if not self.has(pyco.Property.DIFFERENTIABLE):
@@ -802,6 +813,7 @@ class _COOBlock:  # See coo_block() for a detailed description.
             ).op()
         return out
 
+    @pycrt.enforce_precision()
     def diff_lipschitz(self, **kwargs) -> pyct.Real:
         if not self.has(pyco.Property.DIFFERENTIABLE):
             raise NotImplementedError
@@ -811,23 +823,24 @@ class _COOBlock:  # See coo_block() for a detailed description.
         else:
             # Various upper bounds apply depending on how the blocks are organized:
             #   * vertical alignment: dL**2 = sum(dL_k**2)
-            #   * horizontal alignment: dL**2 = max(dL_k**2)
+            #   * horizontal alignment: dL**2 = sum(dL_k**2)
             #   * block-diagonal alignment: dL**2 = max(dL_k**2)
-            #   * arbitrary 2D alignment: vertical+horizontal composition (or vice-versa)
-            # We compute all bounds and take the lowest one.
+            #   * arbitrary 2D alignment: dL**2 = sum(dL_k**2)
+            #     [obtained via vertical+horizontal composition (or vice-versa)]
 
             # squared diff-Lipschitz constant of each block.
             dLs_all = np.zeros(self._grid_shape)
             for (r, c), op in self._block.items():
                 dLs_all[r, c] = op.diff_lipschitz(**kwargs) ** 2
 
-            dLs_1 = dLs_all.sum(axis=0).max()  # upper bound 1
-            dLs_2 = dLs_all.max(axis=1).sum()  # upper bound 2
-            dL = np.sqrt(min(dLs_1, dLs_2))
-        self._diff_lipschitz = float(dL)
+            if np.allclose(dLs_all.sum(), dLs_all.diagonal().sum()):  # block-diag case
+                dL = np.sqrt(dLs_all.max())
+            else:
+                dL = np.sqrt(dLs_all.sum())
+        self._diff_lipschitz = dL
         return self._diff_lipschitz
 
-    @_wrap_if_dask
+    @_parallelize
     @pycrt.enforce_precision(i="arr")
     def grad(self, arr: pyct.NDArray) -> pyct.NDArray:
         if not self.has(pyco.Property.DIFFERENTIABLE_FUNCTION):
@@ -844,7 +857,7 @@ class _COOBlock:  # See coo_block() for a detailed description.
         out = xp.concatenate(parts, axis=-1)
         return out
 
-    @_wrap_if_dask
+    @_parallelize
     @pycrt.enforce_precision(i="arr")
     def adjoint(self, arr: pyct.NDArray) -> pyct.NDArray:
         if not self.has(pyco.Property.LINEAR):
@@ -1011,9 +1024,10 @@ class _COOBlock:  # See coo_block() for a detailed description.
         )
         return CG.squeeze()
 
+    @pycrt.enforce_precision()
     def trace(self, **kwargs) -> pyct.Real:
         tr = self.__class__.trace(self, **kwargs)
-        return float(tr)
+        return tr
 
     def asloss(self, data: pyct.NDArray = None) -> pyct.OpT:
         msg = "asloss() is ambiguous for block-defined operators."

@@ -1,6 +1,7 @@
 References
 ==========
 
+.. [ProxAdam] Melchior, Joseph, Moolekamp. "Proximal Adam: Robust Adaptive Update Scheme for Constrained Optimization" (2020).
 .. [ProxAlg] Parikh, Neal, and Stephen Boyd. "Proximal algorithms." Foundations and Trends in optimization 1.3 (2014): 127-239.
 .. [FirstOrd] Beck, Amir. First-order methods in optimization. Society for Industrial and Applied Mathematics, 2017.
 .. [OnKerLearn] Martins, André FT, et al. "Online multiple kernel learning for structured prediction." arXiv preprint arXiv:1010.2770 (2010).
@@ -20,3 +21,9 @@ References
 .. [SubGauss] Aziznejad, Shayan, and Michael Unser. "An L1 representer theorem for multiple-kernel regression." arXiv preprint arXiv:1811.00836 (2018).
 .. [FINUFFT] Barnett, Alexander H., Jeremy Magland, and Ludvig af Klinteberg. "A parallel nonuniform fast Fourier transform library based on an “Exponential of semicircle" kernel." SIAM Journal on Scientific Computing 41.5 (2019): C479-C504.
 .. [cuFINUFFT] Shih, Yu-hsuan, et al. "cuFINUFFT: a load-balanced GPU library for general-purpose nonuniform FFTs." 2021 IEEE International Parallel and Distributed Processing Symposium Workshops (IPDPSW). IEEE, 2021.
+.. [NumOpt_NocWri] Wright S, Nocedal J. "Numerical optimization". Springer Science. 1999 Apr 3;35(67-68):7.
+.. [PoCS_Dykstra] Boyle JP, Dykstra RL. "A method for finding projections onto the intersection of convex sets in Hilbert spaces." Advances in order restricted statistical inference 1986 (pp. 28-47). Springer, New York, NY.
+.. [WelfordAlg] Welford, B. P. "Note on a method for calculating corrected sums of squares and products." Technometrics 4.3 (1962): 419-420.
+.. [ULA] Alain Durmus, and Éric Moulines. "Nonasymptotic convergence analysis for the unadjusted Langevin algorithm." The Annals of Applied Probability 27(3) 1551-1587, 2017.
+.. [MYULA] Alain Durmus, Éric Moulines, and Marcelo Pereyra, "Efficient Bayesian Computation by Proximal Markov Chain Monte Carlo: When Langevin Meets Moreau", SIAM Journal of Imaging Science, 2018
+.. [UQ_MCMC] Cai, Xiaohao, Marcelo Pereyra, and Jason D. McEwen. "Uncertainty quantification for radio interferometric imaging–I. Proximal MCMC methods." Monthly Notices of the Royal Astronomical Society 480.3 (2018): 4154-4169.

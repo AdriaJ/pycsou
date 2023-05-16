@@ -3,17 +3,22 @@ import typing as typ
 import warnings
 
 import numpy as np
-import scipy.sparse as sp
-import sparse as ssp
 
 import pycsou.abc as pyca
+import pycsou.operator.interop.source as pycsrc
 import pycsou.runtime as pycrt
 import pycsou.util as pycu
 import pycsou.util.deps as pycd
 import pycsou.util.ptype as pyct
 import pycsou.util.warning as pycuw
 
-__all__ = ["IdentityOp", "NullOp", "NullFunc", "HomothetyOp", "DiagonalOp", "Sum"]
+__all__ = [
+    "IdentityOp",
+    "NullOp",
+    "NullFunc",
+    "HomothetyOp",
+    "DiagonalOp",
+]
 
 
 class IdentityOp(pyca.OrthProjOp):
@@ -51,8 +56,9 @@ class IdentityOp(pyca.OrthProjOp):
         op = HomothetyOp(cst=cst, dim=self.dim)
         return op
 
+    @pycrt.enforce_precision()
     def trace(self, **kwargs) -> pyct.Real:
-        return float(self.dim)
+        return self.dim
 
 
 class NullOp(pyca.LinOp):
@@ -102,8 +108,9 @@ class NullOp(pyca.LinOp):
         A = xp.zeros(self.shape, dtype=dtype)
         return A
 
+    @pycrt.enforce_precision()
     def trace(self, **kwargs) -> pyct.Real:
-        return float(0)
+        return 0
 
 
 def NullFunc(dim: pyct.Integer) -> pyct.OpT:
@@ -117,16 +124,16 @@ def NullFunc(dim: pyct.Integer) -> pyct.OpT:
     return op
 
 
-def HomothetyOp(cst: pyct.Real, dim: pyct.Integer) -> pyct.OpT:
+def HomothetyOp(dim: pyct.Integer, cst: pyct.Real) -> pyct.OpT:
     """
     Scaling operator.
 
     Parameters
     ----------
-    cst: pyct.Real
-        Scaling factor.
     dim: pyct.Integer
         Dimension of the domain.
+    cst: pyct.Real
+        Scaling factor.
 
     Returns
     -------
@@ -182,24 +189,28 @@ def HomothetyOp(cst: pyct.Real, dim: pyct.Integer) -> pyct.OpT:
         def op_gram(_):
             return HomothetyOp(cst=_._cst**2, dim=_.dim)
 
+        @pycrt.enforce_precision()
         def op_trace(_, **kwargs):
             out = _._cst * _.codim
-            return float(out)
+            return out
 
-        klass = pyca.PosDefOp if (cst > 0) else pyca.SelfAdjointOp
-        op = klass(shape=(dim, dim))
-        op._cst = cst
-        op._lipschitz = abs(cst)
-        op.apply = types.MethodType(op_apply, op)
-        op.svdvals = types.MethodType(op_svdvals, op)
-        op.eigvals = types.MethodType(op_eigvals, op)
-        op.pinv = types.MethodType(op_pinv, op)
+        op = pycsrc.from_source(
+            cls=pyca.PosDefOp if (cst > 0) else pyca.SelfAdjointOp,
+            shape=(dim, dim),
+            embed=dict(
+                _name="HomothetyOp",
+                _cst=cst,
+            ),
+            _lipschitz=abs(cst),
+            apply=op_apply,
+            svdvals=op_svdvals,
+            eigvals=op_eigvals,
+            pinv=op_pinv,
+            gram=op_gram,
+            cogram=op_gram,
+            trace=op_trace,
+        )
         op.dagger = types.MethodType(op_dagger, op)
-        op.gram = types.MethodType(op_gram, op)
-        op.cogram = op.gram
-        op.trace = types.MethodType(op_trace, op)
-        op._name = "HomothetyOp"
-
     return op.squeeze()
 
 
@@ -246,7 +257,6 @@ def DiagonalOp(
                 return out
 
             def op_asarray(_, **kwargs) -> pyct.NDArray:
-                N = pycd.NDArrayInfo
                 dtype = kwargs.pop("dtype", pycrt.getPrecision().value)
                 xp = kwargs.pop("xp", pycd.NDArrayInfo.NUMPY.module())
 
@@ -303,25 +313,35 @@ def DiagonalOp(
                     enable_warnings=_._enable_warnings,
                 )
 
+            @pycrt.enforce_precision()
+            def op_lipschitz(_, **kwargs):
+                if _._lipschitz == np.inf:
+                    _._lipschitz = float(abs(_._vec).max())
+                return _._lipschitz
+
+            @pycrt.enforce_precision()
             def op_trace(_, **kwargs):
                 return float(_._vec.sum())
 
-            klass = pyca.PosDefOp if pycu.compute(xp.all(vec > 0)) else pyca.SelfAdjointOp
-            op = klass(shape=(dim, dim))
-            op._vec = vec
-            op._enable_warnings = bool(enable_warnings)
-            op._lipschitz = pycu.compute(xp.abs(vec).max())
-            op.apply = types.MethodType(op_apply, op)
-            op.asarray = types.MethodType(op_asarray, op)
-            op.gram = types.MethodType(op_gram, op)
-            op.cogram = op.gram
-            op.svdvals = types.MethodType(op_svdvals, op)
-            op.eigvals = types.MethodType(op_eigvals, op)
-            op.pinv = types.MethodType(op_pinv, op)
+            op = pycsrc.from_source(
+                cls=pyca.PosDefOp if pycu.compute(xp.all(vec > 0)) else pyca.SelfAdjointOp,
+                shape=(dim, dim),
+                embed=dict(
+                    _name="DiagonalOp",
+                    _vec=vec,
+                    _enable_warnings=bool(enable_warnings),
+                ),
+                apply=op_apply,
+                lipschitz=op_lipschitz,
+                asarray=op_asarray,
+                gram=op_gram,
+                cogram=op_gram,
+                svdvals=op_svdvals,
+                eigvals=op_eigvals,
+                pinv=op_pinv,
+                trace=op_trace,
+            )
             op.dagger = types.MethodType(op_dagger, op)
-            op.trace = types.MethodType(op_trace, op)
-            op._name = "DiagonalOp"
-
         return op.squeeze()
 
 
@@ -384,13 +404,13 @@ def _ExplicitLinOp(
         fail_dense = False
         try:
             pycd.NDArrayInfo.from_obj(A)
-        except:
+        except Exception:
             fail_dense = True
 
         fail_sparse = False
         try:
             pycd.SparseArrayInfo.from_obj(A)
-        except:
+        except Exception:
             fail_sparse = True
 
         if fail_dense and fail_sparse:
@@ -433,21 +453,28 @@ def _ExplicitLinOp(
             elif info == S.PYDATA_SPARSE:
                 f = lambda _: _.todense()
             A = f(_.mat.astype(dtype))  # `copy` field not ubiquitous
-        except:  # Dense arrays
+        except Exception:  # Dense arrays
             info = N.from_obj(_.mat)
             A = pycu.compute(_.mat.astype(dtype, copy=False))
+
+            if info == N.DASK:
+                # Chunks may have been mapped to sparse arrays.
+                # Call .asarray() again for a 2nd pass.
+                _op = _ExplicitLinOp(_.__class__, mat=A)
+                A = _op.asarray(xp=N.NUMPY.module(), dtype=A.dtype)
         finally:
             A = pycu.to_NUMPY(A)
 
         return xp.array(A, dtype=dtype)
 
+    @pycrt.enforce_precision()
     def op_trace(_, **kwargs) -> pyct.Real:
         if _.dim != _.codim:
             raise NotImplementedError
         else:
             try:
                 tr = _.mat.trace()
-            except:
+            except Exception:
                 # .trace() missing for [PYDATA,CUPY]_SPARSE API.
                 S = pycd.SparseArrayInfo
                 info = S.from_obj(_.mat)
@@ -455,7 +482,7 @@ def _ExplicitLinOp(
                     # use `sparse.diagonal().sum()`, but array must be COO.
                     try:
                         A = _.mat.tocoo()  # GCXS inputs
-                    except:
+                    except Exception:
                         A = _.mat  # COO inputs
                     finally:
                         tr = info.module().diagonal(A).sum()
@@ -465,6 +492,7 @@ def _ExplicitLinOp(
                     raise ValueError(f"Unknown sparse format {_.mat}.")
             return float(tr)
 
+    @pycrt.enforce_precision()
     def op_lipschitz(_, **kwargs) -> pyct.Real:
         # We want to piggy-back onto Lin[Op,Func].lipschitz() to compute the Lipschitz constant L.
         # Problem: LinOp.lipschitz() relies on svdvals() or hutchpp() to compute L, and they take
@@ -482,7 +510,7 @@ def _ExplicitLinOp(
                 xp=info.module(),
                 gpu=info == N.CUPY,
             )
-        except:  # Sparse arrays
+        except Exception:  # Sparse arrays
             info = S.from_obj(_.mat)
             gpu = info == S.CUPY_SPARSE
             kwargs.update(
@@ -496,96 +524,18 @@ def _ExplicitLinOp(
             L = _.__class__.lipschitz(_, **kwargs)
         return L
 
-    op = cls(shape=mat.shape)
-    op.mat = _standard_form(mat)
-    op._enable_warnings = bool(enable_warnings)
-    op.apply = types.MethodType(op_apply, op)
-    op.adjoint = types.MethodType(op_adjoint, op)
-    op.asarray = types.MethodType(op_asarray, op)
-    op.lipschitz = types.MethodType(op_lipschitz, op)
-    op.trace = types.MethodType(op_trace, op)
-    op._name = "_ExplicitLinOp"
-    return op
-
-
-def Sum(arg_shape, axis=None) -> pyct.OpT:
-    """
-    Summation Operator.
-
-    This operator re-arranges the input array to a multidimensional array of shape ``arg_shape`` and then reduces the
-    array via summation across one or more ``axis``.
-
-    If the input array :math:`\mathbf{x}` consists on a 3D array, and ``axis=-1``:
-
-    .. math::
-        \mathbf{y}_{i,j} = \sum_{k}{\mathbf{x}_{i,j,k}}
-
-    **Adjoint**
-    The adjoint of the sum introduces new dimensions via spreading along the specified ``axes``:
-    If the input array :math:`\mathbf{x}` consists on a 2D array, and ``axis=-1``:
-
-    .. math::
-        \mathbf{y}_{i,j,k} = \mathbf{x}_{i,j}
-
-    Parameters
-    ----------
-    arg_shape: pyct.NDArrayShape
-        Shape of the data to be reduced.
-    axis: int, tuple
-        Axis or axes along which a sum is performed. The default, axis=None, will sum all the elements of the input
-        array. If axis is negative it counts from the last to the first axis.
-
-    Notes
-    -----
-
-    The Lipschitz constant is defined via the following Cauchy-Schwartz inequality (using a vectorized view the input
-    array):
-
-    .. math::
-        \Vert s(\mathbf{x}) \Vert^{2}_{2} = \Vert \sum_{i}^{N} \mathbf{x}_{i} \Vert^{2}_{2} = (\sum_{i}^{N} \mathbf{x}_{i}) ^{2} \leq N \sum_{i}^{N} \mathbf{x}_{i}^{2},
-
-    which suggest an upper bound of the Lipschitz constant of :math:`\sqrt{N}`, where :math:`N` is the total number of
-    elements reduced by the summation (all elements in this example).
-    """
-
-    if axis is None:
-        axis = np.arange(len(arg_shape))
-    elif not isinstance(axis, (list, tuple)):
-        axis = [
-            axis,
-        ]
-    elif isinstance(axis, tuple):
-        axis = list(axis)
-    for i in range(len(axis)):
-        axis[i] = len(arg_shape) - 1 if axis[i] == -1 else axis[i]
-
-    arg_shape, axis = np.array(arg_shape), np.array(axis)
-    adjoint_shape = [d for i, d in enumerate(arg_shape) if i not in axis]
-
-    dim = int(np.prod(arg_shape).item())
-    codim = int((np.prod(arg_shape) / np.prod(arg_shape[axis])).item())
-
-    # Create array of ones with arg_shape dims for adjoint
-    tile = np.ones(len(arg_shape) + 1, dtype=int)
-    tile[axis + 1] = arg_shape[axis]
-
-    @pycrt.enforce_precision(i="arr")
-    def op_apply(_, arr: pyct.NDArray) -> pyct.NDArray:
-        return arr.reshape(-1, *arg_shape).sum(axis=tuple(axis + 1)).reshape(arr.shape[:-1] + (codim,))
-
-    @pycrt.enforce_precision(i="arr")
-    def op_adjoint(_, arr: pyct.NDArray) -> pyct.NDArray:
-        xp = pycu.get_array_module(arr)
-        out = xp.expand_dims(arr.reshape(-1, *adjoint_shape), tuple(axis + 1))
-        out = xp.tile(out, tile).reshape(arr.shape[:-1] + (dim,))
-        return out
-
-    klass = pyca.LinOp if codim != 1 else pyca.LinFunc
-    op = klass(shape=(codim, dim))
-
-    op._lipschitz = np.sqrt(np.prod(arg_shape[axis]))
-    op.apply = types.MethodType(op_apply, op)
-    op.adjoint = types.MethodType(op_adjoint, op)
-    op._name = "Sum"
-
+    op = pycsrc.from_source(
+        cls=cls,
+        shape=mat.shape,
+        embed=dict(
+            _name="_ExplicitLinOp",
+            mat=_standard_form(mat),
+            _enable_warnings=bool(enable_warnings),
+        ),
+        apply=op_apply,
+        adjoint=op_adjoint,
+        asarray=op_asarray,
+        lipschitz=op_lipschitz,
+        trace=op_trace,
+    )
     return op
